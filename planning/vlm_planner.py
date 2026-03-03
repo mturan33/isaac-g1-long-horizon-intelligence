@@ -30,7 +30,7 @@ except ImportError:
 
 
 # Available skills for validation
-AVAILABLE_SKILLS = {"walk_to", "reach", "grasp", "lift", "lateral_walk", "place", "walk_to_position"}
+AVAILABLE_SKILLS = {"walk_to", "reach", "grasp", "lift", "lower", "place", "walk_to_position"}
 
 
 class VLMPlanner:
@@ -115,8 +115,8 @@ AVAILABLE SKILLS:
 - walk_to(target, stop_distance): Walk to an object/surface. stop_distance is how far from the target to stop (meters).
 - reach(target): Extend right arm toward target object using RL policy + magnetic attach.
 - grasp(): Close fingers to grasp object.
-- lift(): Raise arm above basket/container height after grasping.
-- lateral_walk(direction, distance, speed): Walk sideways while holding object. direction="right"/"left".
+- lift(): Raise arm above basket/container height after grasping, moves hand up and toward basket.
+- lower(): Lower arm into basket/container after lifting.
 - place(): Open fingers to release held object, return arm to default.
 - walk_to_position(x, y): Walk to specific world coordinates.
 
@@ -225,7 +225,7 @@ class SimplePlanner:
 
     def _plan_pick(self, task: str, objects: list) -> list:
         """Pick from table and place in basket:
-        walk -> reach -> grasp -> lift -> lateral to basket -> place.
+        walk -> reach -> grasp -> lift -> lower into basket -> place.
         """
         target_obj = self._find_target_object(task, objects)
         if target_obj is None:
@@ -234,14 +234,14 @@ class SimplePlanner:
         return [
             # 1. Walk to object (stop 0.30m away to avoid table collision)
             {"skill": "walk_to", "params": {"target": target_obj["id"], "stop_distance": 0.30}},
-            # 2. Reach and magnetically attach
+            # 2. Reach and magnetically attach (10cm threshold)
             {"skill": "reach", "params": {"target": target_obj["id"]}},
             # 3. Close fingers around object
             {"skill": "grasp", "params": {}},
-            # 4. Lift arm above basket rim height
+            # 4. Lift arm above basket rim height (+ move toward basket)
             {"skill": "lift", "params": {}},
-            # 5. Sidestep right toward basket (~0.4m)
-            {"skill": "lateral_walk", "params": {"direction": "right", "distance": 0.4, "speed": 0.25}},
+            # 5. Lower arm into basket
+            {"skill": "lower", "params": {}},
             # 6. Release into basket
             {"skill": "place", "params": {}},
         ]
