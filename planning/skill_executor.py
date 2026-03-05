@@ -119,12 +119,12 @@ class SkillExecutor:
         dy_body = -sin_y * delta_w[:, 0] + cos_y * delta_w[:, 1]
 
         # P-controller: push robot back toward hold position
-        vx = (dx_body * 2.0).clamp(-0.3, 0.3)
+        vx = (dx_body * 1.5).clamp(-0.3, 0.3)
         vy = (dy_body * 1.0).clamp(-0.15, 0.15)
 
-        # Heading hold
+        # Heading hold — stronger yaw correction to fight arm torque
         heading_err = normalize_angle(hold_yaw - cur_yaw)
-        vyaw = (heading_err * 1.5).clamp(-0.3, 0.3)
+        vyaw = (heading_err * 2.5).clamp(-0.6, 0.6)
 
         hold_cmd = torch.stack([vx, vy, vyaw], dim=-1)
         return hold_cmd, drift
@@ -505,9 +505,9 @@ class SkillExecutor:
                       f"EE->obj={obj_dist:.3f} | drift={drift:.3f} | "
                       f"cmd=[{hold_cmd[0,0]:.2f},{hold_cmd[0,1]:.2f},{hold_cmd[0,2]:.2f}]")
 
-            # Magnetic attach: 0.15m trigger (15cm threshold)
-            if not attached_during_reach and obj_dist < 0.15:
-                attached_during_reach = env.attach_object_to_hand(max_dist=0.20)
+            # Magnetic attach: 0.20m trigger (20cm threshold)
+            if not attached_during_reach and obj_dist < 0.20:
+                attached_during_reach = env.attach_object_to_hand(max_dist=0.25)
                 if attached_during_reach:
                     print(f"  [Reach] ** Magnetic attach at step {step}! dist={obj_dist:.3f}m **")
                     break
