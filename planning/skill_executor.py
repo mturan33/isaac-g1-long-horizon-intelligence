@@ -573,16 +573,25 @@ class SkillExecutor:
         if arm_targets is None:
             arm_targets = env.robot.data.joint_pos[:, env._arm_idx].clone()
 
-        # Use persistent hold position from reach (or compute new one)
+        # Use persistent hold position from reach, but UPDATE if stale
+        # (robot may have drifted during reach hold — stale pos causes PID to fight and destabilize)
         hold_pos_xy = self._hold_pos_xy
         hold_yaw = self._hold_yaw
+        root_pos = env.robot.data.root_pos_w
+        root_quat = env.robot.data.root_quat_w
         if hold_pos_xy is None:
-            root_pos = env.robot.data.root_pos_w
-            root_quat = env.robot.data.root_quat_w
             hold_pos_xy = root_pos[:, :2].clone()
             hold_yaw = get_yaw_from_quat(root_quat).clone()
-            self._hold_pos_xy = hold_pos_xy
-            self._hold_yaw = hold_yaw
+        else:
+            # Check drift from stored hold position
+            cur_pos_xy = root_pos[:, :2]
+            drift_check = (hold_pos_xy - cur_pos_xy).norm(dim=-1).mean().item()
+            if drift_check > 0.3:
+                print(f"  [Grasp] Hold position stale (drift={drift_check:.3f}m), updating to current")
+                hold_pos_xy = cur_pos_xy.clone()
+                hold_yaw = get_yaw_from_quat(root_quat).clone()
+        self._hold_pos_xy = hold_pos_xy
+        self._hold_yaw = hold_yaw
 
         # Check if already attached during reach
         already_attached = getattr(env, '_object_attached', False)
@@ -641,10 +650,13 @@ class SkillExecutor:
         root_pos = env.robot.data.root_pos_w
         root_quat = env.robot.data.root_quat_w
 
-        # Compute lift target in body frame: STRAIGHT UP (vertical lift)
+        # Compute lift target in body frame: UP + ensure arm stays in FRONT
         ee_body = quat_apply_inverse(root_quat, ee_world - root_pos)
         lift_body = ee_body.clone()
         lift_body[:, 2] += 0.15  # 15cm straight up (body frame +Z)
+        # CRITICAL: Clamp body X >= 0.15 to keep arm in front of robot
+        # Without this, arm policy may swing arm behind body during lift
+        lift_body[:, 0] = torch.clamp(lift_body[:, 0], min=0.15)
 
         # Clamp to arm workspace
         shoulder_offset = torch.tensor(self.SHOULDER_OFFSET, device=self.device)
@@ -656,8 +668,10 @@ class SkillExecutor:
         # Convert to world frame
         lift_target_world = quat_apply(root_quat, lift_body_clamped) + root_pos
 
-        print(f"  [Lift] Current EE: [{ee_world[0,0]:.3f}, {ee_world[0,1]:.3f}, {ee_world[0,2]:.3f}]")
-        print(f"  [Lift] Target:     [{lift_target_world[0,0]:.3f}, {lift_target_world[0,1]:.3f}, {lift_target_world[0,2]:.3f}]")
+        print(f"  [Lift] Current EE body: [{ee_body[0,0]:.3f}, {ee_body[0,1]:.3f}, {ee_body[0,2]:.3f}]")
+        print(f"  [Lift] Lift target body: [{lift_body_clamped[0,0]:.3f}, {lift_body_clamped[0,1]:.3f}, {lift_body_clamped[0,2]:.3f}]")
+        print(f"  [Lift] Current EE world: [{ee_world[0,0]:.3f}, {ee_world[0,1]:.3f}, {ee_world[0,2]:.3f}]")
+        print(f"  [Lift] Target world:     [{lift_target_world[0,0]:.3f}, {lift_target_world[0,1]:.3f}, {lift_target_world[0,2]:.3f}]")
 
         # Enable arm policy and set target
         env.enable_arm_policy(True)
@@ -669,19 +683,37 @@ class SkillExecutor:
         hold_yaw = get_yaw_from_quat(root_quat).clone()
         print(f"  [Lift] PID hold at [{hold_pos_xy[0,0]:.3f}, {hold_pos_xy[0,1]:.3f}]")
 
-        # Run arm policy for 120 steps with PID hold
-        for step in range(120):
+        # Run arm policy for 80 steps with PID hold (reduced from 120 — arm oscillates if too long)
+        behind_count = 0
+        for step in range(80):
             if not self._is_running():
                 break
             hold_cmd, drift = self._compute_hold_cmd(hold_pos_xy, hold_yaw)
             obs = env.step_arm_policy(hold_cmd)
 
-            if step % 20 == 0:
+            if step % 10 == 0:
                 ee_now, _ = env._compute_palm_ee()
                 h = obs["base_height"].mean().item()
                 standing = (obs["base_height"] > 0.5).sum().item()
-                print(f"  [Lift] Step {step:3d} | h={h:.2f} | stand={standing}/{env.num_envs} | "
-                      f"drift={drift:.3f} | EE=[{ee_now[0,0]:.2f},{ee_now[0,1]:.2f},{ee_now[0,2]:.2f}]")
+                # Check body-frame X to detect arm going behind
+                root_pos_c = env.robot.data.root_pos_w
+                root_quat_c = env.robot.data.root_quat_w
+                ee_body_c = quat_apply_inverse(root_quat_c, ee_now - root_pos_c)
+                body_x = ee_body_c[0, 0].item()
+
+                if step % 20 == 0:
+                    print(f"  [Lift] Step {step:3d} | h={h:.2f} | stand={standing}/{env.num_envs} | "
+                          f"drift={drift:.3f} | EE=[{ee_now[0,0]:.2f},{ee_now[0,1]:.2f},{ee_now[0,2]:.2f}] | "
+                          f"bodyX={body_x:.2f}")
+
+                # Early stop if arm goes behind robot for multiple checks
+                if step > 15 and body_x < -0.05:
+                    behind_count += 1
+                    if behind_count >= 3:
+                        print(f"  [Lift] EARLY STOP at step {step}: arm behind robot (bodyX={body_x:.3f}, count={behind_count})")
+                        break
+                else:
+                    behind_count = max(0, behind_count - 1)
 
         # Freeze arm at current position
         env.enable_arm_policy(False)
@@ -787,8 +819,14 @@ class SkillExecutor:
     def _execute_lower(self) -> dict:
         """Lower the held object into the basket using the arm policy.
 
-        Sets a target position BELOW current EE (into basket),
-        then lets the Stage 7 arm policy handle the IK.
+        Uses a FIXED forward-and-down body-frame target instead of relative
+        to current EE. This ensures the arm moves toward the basket even if
+        it drifted behind during lift.
+
+        Body-frame target: [0.25, -0.20, -0.05]
+          - X=0.25: forward (toward basket/table)
+          - Y=-0.20: slightly right (right arm workspace)
+          - Z=-0.05: slightly below root (basket height ~0.70m, root ~0.77m)
         """
         from isaaclab.utils.math import quat_apply_inverse, quat_apply
 
@@ -800,11 +838,15 @@ class SkillExecutor:
         ee_world, _ = env._compute_palm_ee()
         root_pos = env.robot.data.root_pos_w
         root_quat = env.robot.data.root_quat_w
-
-        # Compute lower target in body frame: DOWN into basket
         ee_body = quat_apply_inverse(root_quat, ee_world - root_pos)
-        lower_body = ee_body.clone()
-        lower_body[:, 2] -= 0.15  # 15cm down (into basket)
+
+        # Fixed forward-down body-frame target (toward basket)
+        lower_body = torch.tensor(
+            [[0.25, -0.20, -0.05]], dtype=torch.float32, device=self.device,
+        ).expand(env.num_envs, -1)
+
+        print(f"  [Lower] Current EE body: [{ee_body[0,0]:.3f}, {ee_body[0,1]:.3f}, {ee_body[0,2]:.3f}]")
+        print(f"  [Lower] Target body:     [{lower_body[0,0]:.3f}, {lower_body[0,1]:.3f}, {lower_body[0,2]:.3f}]")
 
         # Clamp to arm workspace
         shoulder_offset = torch.tensor(self.SHOULDER_OFFSET, device=self.device)
@@ -816,8 +858,8 @@ class SkillExecutor:
         # Convert to world frame
         lower_target_world = quat_apply(root_quat, lower_body_clamped) + root_pos
 
-        print(f"  [Lower] Current EE: [{ee_world[0,0]:.3f}, {ee_world[0,1]:.3f}, {ee_world[0,2]:.3f}]")
-        print(f"  [Lower] Target:     [{lower_target_world[0,0]:.3f}, {lower_target_world[0,1]:.3f}, {lower_target_world[0,2]:.3f}]")
+        print(f"  [Lower] Current EE world: [{ee_world[0,0]:.3f}, {ee_world[0,1]:.3f}, {ee_world[0,2]:.3f}]")
+        print(f"  [Lower] Target world:     [{lower_target_world[0,0]:.3f}, {lower_target_world[0,1]:.3f}, {lower_target_world[0,2]:.3f}]")
 
         # Enable arm policy and set target
         env.enable_arm_policy(True)
@@ -828,8 +870,8 @@ class SkillExecutor:
         hold_pos_xy = root_pos[:, :2].clone()
         hold_yaw = get_yaw_from_quat(root_quat).clone()
 
-        # Run arm policy for 80 steps with PID hold
-        for step in range(80):
+        # Run arm policy for 100 steps with PID hold
+        for step in range(100):
             if not self._is_running():
                 break
             hold_cmd, drift = self._compute_hold_cmd(hold_pos_xy, hold_yaw)
@@ -837,10 +879,13 @@ class SkillExecutor:
 
             if step % 20 == 0:
                 ee_now, _ = env._compute_palm_ee()
+                ee_body_now = quat_apply_inverse(env.robot.data.root_quat_w,
+                    ee_now - env.robot.data.root_pos_w)
                 h = obs["base_height"].mean().item()
                 standing = (obs["base_height"] > 0.5).sum().item()
                 print(f"  [Lower] Step {step:3d} | h={h:.2f} | stand={standing}/{env.num_envs} | "
-                      f"drift={drift:.3f} | EE z={ee_now[0,2]:.3f}")
+                      f"drift={drift:.3f} | EE z={ee_now[0,2]:.3f} | "
+                      f"bodyXZ=[{ee_body_now[0,0]:.2f},{ee_body_now[0,2]:.2f}]")
 
         # Freeze arm at current position
         env.enable_arm_policy(False)
