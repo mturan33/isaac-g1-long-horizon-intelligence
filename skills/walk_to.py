@@ -143,29 +143,37 @@ class WalkToSkill(BaseSkill):
             robot_pos_xy, robot_yaw, target
         )
 
+        # Filter out fallen robots from distance calculation
+        # Fallen robots have random/drifted positions that corrupt the mean
+        standing_mask = base_height.squeeze() > MIN_BASE_HEIGHT
+        if standing_mask.any():
+            effective_dist = distance[standing_mask].mean().item()
+        else:
+            effective_dist = distance.mean().item()
+
         # Check arrival -- use stop_distance if set, otherwise position_threshold
-        # Use mean distance (not .all()) to prevent one slow env from blocking everyone
         arrival_dist = self.cfg.stop_distance if self.cfg.stop_distance > 0 else self.cfg.position_threshold
-        if distance.mean() < arrival_dist:
+        if effective_dist < arrival_dist:
             # Stop the robot
             zero_cmd = torch.zeros_like(cmd_vel)
             return zero_cmd, True, self._make_success(
                 reason="Reached target",
-                final_distance=distance.mean().item(),
+                final_distance=effective_dist,
             )
 
         # Log progress periodically
         if self._step_count % 100 == 0:
             stall = f", boost={self._pid._stall_boost.mean():.2f}" if self._pid._stall_boost.mean() > 0.01 else ""
+            n_standing = standing_mask.sum().item()
             print(
                 f"[WalkTo] Step {self._step_count}: "
-                f"dist={distance.mean().item():.2f}m, "
+                f"dist={effective_dist:.2f}m ({n_standing}/{num_envs} standing), "
                 f"cmd=[{cmd_vel[0,0]:.2f}, {cmd_vel[0,1]:.2f}, {cmd_vel[0,2]:.2f}]"
                 f"{stall}"
             )
 
         return cmd_vel, False, self._make_running(
-            distance=distance.mean().item(),
+            distance=effective_dist,
         )
 
     def get_affordance(self, state: dict) -> float:

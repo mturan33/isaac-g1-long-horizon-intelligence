@@ -325,12 +325,17 @@ class AdaptivePIDWalkController:
         if len(self._dist_history) > self.stall_window:
             old_dist = self._dist_history[-self.stall_window]
             new_dist = self._dist_history[-1]
-            progress = old_dist - new_dist
+            progress = old_dist - new_dist  # positive = getting closer
             if progress < self.stall_threshold:
-                # Stalled! Boost forward velocity (works in all phases)
-                self._stall_boost = torch.clamp(
-                    self._stall_boost + 0.02, 0, 0.4
-                )
+                if progress >= -0.05:
+                    # Stalled but NOT going wrong way — boost to overcome
+                    self._stall_boost = torch.clamp(
+                        self._stall_boost + 0.02, 0, 0.4
+                    )
+                else:
+                    # Going WRONG WAY (distance increasing fast) — decay boost fast
+                    # Boosting forward when heading is wrong makes it worse
+                    self._stall_boost = (self._stall_boost * 0.5).clamp(min=0)
             else:
                 # Making progress, decay boost
                 self._stall_boost = (self._stall_boost * 0.95).clamp(min=0)

@@ -225,9 +225,9 @@ class SkillExecutor:
         walk_cfg.stop_distance = stop_distance
         walk_cfg.max_steps = 4000  # 80s at 50Hz
         if hold_arm:
-            walk_cfg.max_forward_vel = 0.5
+            walk_cfg.max_forward_vel = 0.3   # Slow walk when carrying object (CoM shifted)
             walk_cfg.max_yaw_rate = 0.8
-            walk_cfg.max_lateral_vel = 0.2
+            walk_cfg.max_lateral_vel = 0.15
         else:
             walk_cfg.max_yaw_rate = 0.8
             walk_cfg.max_lateral_vel = 0.4
