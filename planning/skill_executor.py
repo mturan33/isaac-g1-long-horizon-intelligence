@@ -839,9 +839,10 @@ class SkillExecutor:
     def _execute_lower(self) -> dict:
         """Lower the held object into the basket using the arm policy.
 
-        Uses a FIXED forward-and-down body-frame target instead of relative
-        to current EE. This ensures the arm moves toward the basket even if
-        it drifted behind during lift.
+        Uses GRADUAL TARGET INTERPOLATION to prevent arm oscillation.
+        Instead of jumping to the final target (which causes overshoot + oscillation),
+        the target moves smoothly from the current EE body position to the final
+        lower position over 80 steps, then holds for 20 steps.
 
         Body-frame target: [0.25, -0.20, -0.05]
           - X=0.25: forward (toward basket/table)
@@ -860,50 +861,67 @@ class SkillExecutor:
         root_quat = env.robot.data.root_quat_w
         ee_body = quat_apply_inverse(root_quat, ee_world - root_pos)
 
-        # Fixed forward-down body-frame target (toward basket)
-        lower_body = torch.tensor(
+        # Start position (current EE in body frame)
+        lower_body_start = ee_body.clone()
+
+        # Final forward-down body-frame target (toward basket)
+        lower_body_final = torch.tensor(
             [[0.25, -0.20, -0.05]], dtype=torch.float32, device=self.device,
         ).expand(env.num_envs, -1)
 
-        print(f"  [Lower] Current EE body: [{ee_body[0,0]:.3f}, {ee_body[0,1]:.3f}, {ee_body[0,2]:.3f}]")
-        print(f"  [Lower] Target body:     [{lower_body[0,0]:.3f}, {lower_body[0,1]:.3f}, {lower_body[0,2]:.3f}]")
+        print(f"  [Lower] Start EE body:  [{ee_body[0,0]:.3f}, {ee_body[0,1]:.3f}, {ee_body[0,2]:.3f}]")
+        print(f"  [Lower] Target body:    [{lower_body_final[0,0]:.3f}, {lower_body_final[0,1]:.3f}, {lower_body_final[0,2]:.3f}]")
 
-        # Clamp to arm workspace
+        # Clamp final target to arm workspace
         shoulder_offset = torch.tensor(self.SHOULDER_OFFSET, device=self.device)
-        from_shoulder = lower_body - shoulder_offset.unsqueeze(0)
+        from_shoulder = lower_body_final - shoulder_offset.unsqueeze(0)
         dist = from_shoulder.norm(dim=-1, keepdim=True)
         scale = torch.clamp(self.MAX_REACH / (dist + 1e-6), max=1.0)
         lower_body_clamped = shoulder_offset.unsqueeze(0) + from_shoulder * scale
 
-        # Convert to world frame
-        lower_target_world = quat_apply(root_quat, lower_body_clamped) + root_pos
-
         print(f"  [Lower] Current EE world: [{ee_world[0,0]:.3f}, {ee_world[0,1]:.3f}, {ee_world[0,2]:.3f}]")
-        print(f"  [Lower] Target world:     [{lower_target_world[0,0]:.3f}, {lower_target_world[0,1]:.3f}, {lower_target_world[0,2]:.3f}]")
 
-        # Enable arm policy and set target
+        # Enable arm policy
         env.enable_arm_policy(True)
-        env.set_arm_target_world(lower_target_world)
         env.reset_arm_policy_state()
 
-        # Save hold position — PID prevents drift during lower
+        # Save hold position -- PID prevents drift during lower
         hold_pos_xy = root_pos[:, :2].clone()
         hold_yaw = get_yaw_from_quat(root_quat).clone()
 
-        # Run arm policy for 100 steps with PID hold
-        for step in range(100):
+        # Gradually interpolate target from current to final over ramp_steps
+        # This prevents the arm policy from overshooting and oscillating
+        ramp_steps = 80
+        total_steps = 100
+
+        for step in range(total_steps):
             if not self._is_running():
                 break
+
+            # Smooth progress: 0.0 -> 1.0 over ramp_steps, then stays at 1.0
+            t = min(step / ramp_steps, 1.0)
+
+            # Interpolated body-frame target
+            interp_body = lower_body_start + t * (lower_body_clamped - lower_body_start)
+
+            # Convert to world frame using CURRENT root pose (robot sways)
+            cur_root_pos = env.robot.data.root_pos_w
+            cur_root_quat = env.robot.data.root_quat_w
+            interp_world = quat_apply(cur_root_quat, interp_body) + cur_root_pos
+
+            # Update arm target each step (smooth tracking)
+            env.set_arm_target_world(interp_world)
+
             hold_cmd, drift = self._compute_hold_cmd(hold_pos_xy, hold_yaw)
             obs = env.step_arm_policy(hold_cmd)
 
             if step % 20 == 0:
                 ee_now, _ = env._compute_palm_ee()
-                ee_body_now = quat_apply_inverse(env.robot.data.root_quat_w,
-                    ee_now - env.robot.data.root_pos_w)
+                ee_body_now = quat_apply_inverse(cur_root_quat,
+                    ee_now - cur_root_pos)
                 h = obs["base_height"].mean().item()
                 standing = (obs["base_height"] > 0.5).sum().item()
-                print(f"  [Lower] Step {step:3d} | h={h:.2f} | stand={standing}/{env.num_envs} | "
+                print(f"  [Lower] Step {step:3d} | t={t:.2f} | h={h:.2f} | stand={standing}/{env.num_envs} | "
                       f"drift={drift:.3f} | EE z={ee_now[0,2]:.3f} | "
                       f"bodyXZ=[{ee_body_now[0,0]:.2f},{ee_body_now[0,2]:.2f}]")
 
