@@ -247,8 +247,8 @@ class SimplePlanner:
             {"skill": "grasp", "params": {}},
             # 5. Lift arm straight up above basket height
             {"skill": "lift", "params": {}},
-            # 6. Walk to basket with arm held (PID handles heading)
-            {"skill": "walk_to", "params": {"target": "table_01", "stop_distance": 0.30, "hold_arm": True}},
+            # 6. Walk to basket with arm held (0.45m — robot at table edge is close enough)
+            {"skill": "walk_to", "params": {"target": "table_01", "stop_distance": 0.45, "hold_arm": True}},
             # 7. Lower arm into basket
             {"skill": "lower", "params": {}},
             # 8. Release into basket

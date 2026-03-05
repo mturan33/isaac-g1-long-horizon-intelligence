@@ -326,15 +326,19 @@ class AdaptivePIDWalkController:
             old_dist = self._dist_history[-self.stall_window]
             new_dist = self._dist_history[-1]
             progress = old_dist - new_dist  # positive = getting closer
+            mean_abs_heading = abs_heading.mean().item()
             if progress < self.stall_threshold:
-                if progress >= -0.05:
-                    # Stalled but NOT going wrong way — boost to overcome
+                if mean_abs_heading > 0.5:
+                    # Stalled because heading is wrong — don't boost forward (causes orbit)
+                    # Just let the yaw controller align, then forward will work naturally
+                    self._stall_boost = (self._stall_boost * 0.7).clamp(min=0)
+                elif progress >= -0.05:
+                    # Stalled but roughly aligned — boost to overcome
                     self._stall_boost = torch.clamp(
                         self._stall_boost + 0.02, 0, 0.4
                     )
                 else:
                     # Going WRONG WAY (distance increasing fast) — decay boost fast
-                    # Boosting forward when heading is wrong makes it worse
                     self._stall_boost = (self._stall_boost * 0.5).clamp(min=0)
             else:
                 # Making progress, decay boost
@@ -346,8 +350,9 @@ class AdaptivePIDWalkController:
         vx = vx * approach_scale
         vy = vy * approach_scale
 
-        # Add stall boost AFTER deceleration (applies in all phases including turn)
-        vx = (vx + self._stall_boost).clamp(-self.max_lin_vel_x, self.max_lin_vel_x)
+        # Add stall boost scaled by heading alignment (prevents orbit when misaligned)
+        aligned_boost = self._stall_boost * heading_alignment
+        vx = (vx + aligned_boost).clamp(-self.max_lin_vel_x, self.max_lin_vel_x)
 
         # Ensure minimum forward vel when target is ahead and not turning
         vx = torch.where(
