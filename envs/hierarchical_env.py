@@ -623,7 +623,7 @@ class HierarchicalG1Env:
             if self._palm_body_idx is not None:
                 print(f"  EE body: {body_names[self._palm_body_idx]} (idx={self._palm_body_idx})")
 
-            print(f"  ArmPolicy joints (5): {[joint_names[i] for i in ap_idx]}")
+            print(f"  ArmPolicy joints ({len(ap_idx)}): {[joint_names[i] for i in ap_idx]}")
             print(f"  Right fingers (7): {[joint_names[i] for i in rf_idx[:3]]}...")
 
     # --------------------------------------------------------------------- #
@@ -1113,6 +1113,14 @@ class HierarchicalG1Env:
             steps_since_spawn=self._arm_steps_since_spawn,
             target_orient=self._arm_target_orient,
         )
+
+        # Debug: print obs shape and key values on first step
+        if self._arm_steps_since_spawn[0].item() == 0:
+            pos_err = self._arm_target_body - ee_body
+            print(f"  [ArmObs] shape={obs.shape}, arm_pos[0]={arm_pos[0].tolist()}")
+            print(f"  [ArmObs] ee_body[0]={ee_body[0].tolist()}")
+            print(f"  [ArmObs] target_body[0]={self._arm_target_body[0].tolist()}")
+            print(f"  [ArmObs] pos_error[0]={pos_err[0].tolist()}")
 
         # Increment arm step counter
         self._arm_steps_since_spawn += 1
