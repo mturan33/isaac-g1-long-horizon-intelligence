@@ -1,7 +1,7 @@
 """
-V6.2 Locomotion Policy Wrapper
-================================
-Loads a trained V6.2 unified locomotion policy checkpoint and provides
+Locomotion Policy Wrapper (V6.2 + Stage 2 Loco)
+=================================================
+Loads a trained locomotion policy checkpoint and provides
 a clean inference interface.
 
 Architecture: 66 -> 512(LN+ELU) -> 256(LN+ELU) -> 128(LN+ELU) -> 15
@@ -9,9 +9,11 @@ Architecture: 66 -> 512(LN+ELU) -> 256(LN+ELU) -> 128(LN+ELU) -> 15
   - 15-dim action (12 legs + 3 waist)
   - Does NOT control arms or fingers — those are handled externally
 
-Checkpoint format: {"model": {"actor.0.weight": ..., "log_std": ...}, "iteration": ..., "best_reward": ...}
+Supports two checkpoint formats:
+  V6.2:        {"model": {"actor.0.weight": ..., "log_std": ...}}
+  Stage 2 Loco: {"model": {"loco_actor.0.weight": ..., "loco_log_std": ..., "arm_actor.*": ...}}
 
-V6.2 trained on 29-DoF + DEX3 G1 robot:
+V6.2 / Stage 2 Loco trained on 29-DoF + DEX3 G1 robot:
   - 43 total joints (15 loco + 14 arm + 14 fingers)
   - Loco policy controls legs + waist only (15 joints)
   - Arms set to default pose, fingers open
@@ -63,12 +65,28 @@ class LocomotionPolicy:
         layers.append(nn.Linear(prev, self.ACT_DIM))
         self.actor = nn.Sequential(*layers)
 
-        # Load actor weights from checkpoint
+        # Load actor weights from checkpoint — supports V6.2 and Stage 2 Loco formats
         state_dict = checkpoint.get("model", checkpoint)
+
+        # Detect checkpoint format
+        has_loco_actor = any(k.startswith("loco_actor.") for k in state_dict)
+        has_actor = any(k.startswith("actor.") for k in state_dict)
+
         actor_dict = {}
-        for k, v in state_dict.items():
-            if k.startswith("actor."):
-                actor_dict[k[len("actor."):]] = v
+        if has_loco_actor:
+            # Stage 2 Loco format: loco_actor.X -> X
+            ckpt_type = "Stage2Loco"
+            for k, v in state_dict.items():
+                if k.startswith("loco_actor."):
+                    actor_dict[k[len("loco_actor."):]] = v
+        elif has_actor:
+            # V6.2 format: actor.X -> X
+            ckpt_type = "V6.2"
+            for k, v in state_dict.items():
+                if k.startswith("actor."):
+                    actor_dict[k[len("actor."):]] = v
+        else:
+            raise ValueError(f"Unknown checkpoint format. Keys: {list(state_dict.keys())[:10]}")
 
         self.actor.load_state_dict(actor_dict)
         self.actor.to(self.device)
@@ -79,9 +97,9 @@ class LocomotionPolicy:
         self.best_reward = checkpoint.get("best_reward", "?")
         self.curriculum_level = checkpoint.get("curriculum_level", "?")
 
-        print(f"[LocoPolicy V6.2] Architecture: {self.OBS_DIM} -> [512,256,128](LN+ELU) -> {self.ACT_DIM}")
-        print(f"[LocoPolicy V6.2] Checkpoint: {os.path.basename(checkpoint_path)}")
-        print(f"[LocoPolicy V6.2] iter={self.iteration}, best_reward={self.best_reward}, "
+        print(f"[LocoPolicy {ckpt_type}] Architecture: {self.OBS_DIM} -> [512,256,128](LN+ELU) -> {self.ACT_DIM}")
+        print(f"[LocoPolicy {ckpt_type}] Checkpoint: {os.path.basename(checkpoint_path)}")
+        print(f"[LocoPolicy {ckpt_type}] iter={self.iteration}, best_reward={self.best_reward}, "
               f"curriculum_level={self.curriculum_level}")
 
     @torch.no_grad()
