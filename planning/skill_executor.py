@@ -377,7 +377,7 @@ class SkillExecutor:
 
         # Stabilize after walk
         print("  [WalkTo] Stabilizing...")
-        for _ in range(50):
+        for _ in range(30):
             if not self._is_running():
                 break
             if arm_targets is not None:
@@ -514,16 +514,16 @@ class SkillExecutor:
             heading_err = normalize_angle(target_heading - yaw)
 
             if carrying:
-                # CARRY mode: omnidirectional at reduced velocities
+                # CARRY mode: omnidirectional at moderate velocities
                 # Scale forward velocity by heading alignment to prevent spiraling
                 alignment = torch.cos(heading_err).clamp(0.0, 1.0)  # 1.0 = facing target
-                vx = (dx_body * 0.8 * alignment).clamp(-0.35, 0.35)
-                vy = (dy_body * 0.5).clamp(-0.20, 0.20)
-                vyaw = (heading_err * 0.6).clamp(-0.30, 0.30)
+                vx = (dx_body * 1.0 * alignment).clamp(-0.40, 0.40)
+                vy = (dy_body * 0.6).clamp(-0.25, 0.25)
+                vyaw = (heading_err * 0.8).clamp(-0.35, 0.35)
 
-                # Gentle ramp-up over first 30 steps (0.5 → 1.0)
-                if step < 30:
-                    ramp = 0.5 + 0.5 * (step / 30.0)
+                # Gentle ramp-up over first 20 steps (0.5 → 1.0)
+                if step < 20:
+                    ramp = 0.5 + 0.5 * (step / 20.0)
                     vx = vx * ramp
                     vy = vy * ramp
                     vyaw = vyaw * ramp
@@ -533,8 +533,13 @@ class SkillExecutor:
                 vy = (dy_body * 0.6).clamp(-0.20, 0.20)
                 vyaw = (heading_err * 0.5).clamp(-0.3, 0.3)
 
-            # Zero velocity for fallen envs (don't waste policy capacity)
-            vel_cmd = torch.stack([vx, vy, vyaw], dim=-1)
+            # EMA smoothing to prevent zigzag (alpha=0.3 → smooth trajectory)
+            raw_cmd = torch.stack([vx, vy, vyaw], dim=-1)
+            if step == 0:
+                smoothed_cmd = raw_cmd.clone()
+            else:
+                smoothed_cmd = 0.3 * raw_cmd + 0.7 * smoothed_cmd
+            vel_cmd = smoothed_cmd
             vel_cmd = torch.where(self.env_active.unsqueeze(-1), vel_cmd, self._stand_cmd)
             obs = env.step_manipulation(vel_cmd, arm_targets)
 
