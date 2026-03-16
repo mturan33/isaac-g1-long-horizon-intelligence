@@ -423,7 +423,66 @@ class SkillExecutor:
         else:
             print(f"  [OmniWalk] NORMAL mode: full velocities (no load)")
 
-        # No pre-walk yaw correction when carrying — robot walks laterally without turning
+        # --- Pre-walk yaw correction when carrying ---
+        # During lift, the robot's heading can drift ~5-10°. With vyaw=0 in
+        # carry mode the robot can never fix this, so the target ends up in
+        # the body-frame rear quadrant → backward walking.
+        # Fix: rotate in-place to face the target BEFORE starting the carry walk.
+        if carrying:
+            import math as _math_yaw
+            YAW_THRESH = _math_yaw.radians(8)   # 8° tolerance — good enough
+            YAW_MAX_STEPS = 150                  # ~3s at 50Hz
+            YAW_RATE = 0.25                      # gentle rotation speed
+
+            root_pos_y = env.robot.data.root_pos_w
+            root_quat_y = env.robot.data.root_quat_w
+            delta_y = target_xy - root_pos_y[:, :2]
+            target_heading_y = torch.atan2(delta_y[:, 1], delta_y[:, 0])
+            cur_yaw_y = get_yaw_from_quat(root_quat_y)
+            heading_err_y = normalize_angle(target_heading_y - cur_yaw_y)
+
+            if heading_err_y.abs().mean().item() > YAW_THRESH:
+                print(f"  [OmniWalk] Pre-walk yaw correction: heading_err={_math_yaw.degrees(heading_err_y[0].item()):.1f}deg")
+                for yaw_step in range(YAW_MAX_STEPS):
+                    if not self._is_running():
+                        break
+                    root_pos_y = env.robot.data.root_pos_w
+                    root_quat_y = env.robot.data.root_quat_w
+                    delta_y = target_xy - root_pos_y[:, :2]
+                    target_heading_y = torch.atan2(delta_y[:, 1], delta_y[:, 0])
+                    cur_yaw_y = get_yaw_from_quat(root_quat_y)
+                    heading_err_y = normalize_angle(target_heading_y - cur_yaw_y)
+
+                    # Check convergence
+                    if heading_err_y.abs().mean().item() < YAW_THRESH:
+                        print(f"  [OmniWalk] Yaw corrected at step {yaw_step}: err={_math_yaw.degrees(heading_err_y[0].item()):.1f}deg")
+                        break
+
+                    # Pure yaw command — no forward/lateral
+                    vyaw_corr = (heading_err_y * 0.5).clamp(-YAW_RATE, YAW_RATE)
+                    yaw_cmd = torch.zeros(env.num_envs, 3, device=self.device)
+                    yaw_cmd[:, 2] = vyaw_corr
+                    yaw_cmd = torch.where(self.env_active.unsqueeze(-1), yaw_cmd, self._stand_cmd)
+                    obs = env.step_manipulation(yaw_cmd, arm_targets)
+
+                    if yaw_step % 30 == 0:
+                        h = obs["base_height"].mean().item()
+                        print(f"  [OmniWalk] Yaw step {yaw_step} | err={_math_yaw.degrees(heading_err_y[0].item()):.1f}deg | h={h:.2f}")
+
+                    # Safety: stop if falling
+                    if (obs["base_height"] < 0.4).sum().item() > env.num_envs // 2:
+                        print(f"  [OmniWalk] Yaw correction aborted — robots falling")
+                        break
+                else:
+                    print(f"  [OmniWalk] Yaw correction timeout ({YAW_MAX_STEPS} steps): err={_math_yaw.degrees(heading_err_y[0].item()):.1f}deg")
+
+                # Brief stabilize after rotation
+                for _ in range(20):
+                    if not self._is_running():
+                        break
+                    obs = env.step_manipulation(self._stand_cmd, arm_targets)
+            else:
+                print(f"  [OmniWalk] Heading OK ({_math_yaw.degrees(heading_err_y[0].item()):.1f}deg), skipping yaw correction")
 
         # Per-env tracking
         env_reached = torch.zeros(env.num_envs, dtype=torch.bool, device=self.device)
