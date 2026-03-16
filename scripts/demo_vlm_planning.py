@@ -98,16 +98,16 @@ import isaaclab.sim as sim_utils
 class VideoRecorder:
     """Captures viewport frames at target FPS, then merges with ffmpeg."""
 
-    def __init__(self, output_dir: str, fps: int = 25, sim_dt: float = 0.02):
+    def __init__(self, output_dir: str, fps: int = 25, control_dt: float = 0.02):
         self.output_dir = output_dir
         self.fps = fps
         self.frame_dir = os.path.join(output_dir, "frames")
         os.makedirs(self.frame_dir, exist_ok=True)
         self.frame_count = 0
         self._sim_step = 0
-        # Capture every N-th sim step to achieve target FPS
-        # sim runs at 1/sim_dt Hz (e.g., 50Hz), target is fps (e.g., 25)
-        self._capture_interval = max(1, int(1.0 / (sim_dt * fps)))
+        # Capture every N-th env.step() call to achieve target FPS
+        # env.step() runs at 1/control_dt Hz (e.g., 50Hz), target is fps (e.g., 25)
+        self._capture_interval = max(1, int(1.0 / (control_dt * fps)))
 
         from omni.kit.viewport.utility import get_active_viewport
         self.viewport = get_active_viewport()
@@ -179,24 +179,19 @@ class CameraTracker:
     """
 
     # Camera offset relative to robot origin (body frame convention: +X forward, +Y left)
-    # 45 deg front-right, 2m away, shoulder height (~1.0m)
-    # front-right = negative Y (right), positive X (front)
-    EYE_OFFSET = (1.4, -1.4, 1.1)      # 2m at 45deg: (2*cos45, -2*sin45, height)
-    TARGET_OFFSET = (0.3, -0.1, 0.7)   # Look at torso/hand area
+    # 45 deg front-right, ~3m away, shoulder height
+    # front-right = positive X (front), negative Y (right)
+    EYE_OFFSET = (2.1, -2.1, 1.3)      # ~3m at 45deg: (3*cos45, -3*sin45, height)
+    TARGET_OFFSET = (0.2, -0.1, 0.65)  # Look at torso center
 
     def __init__(self):
         self._smooth_x = 0.0
         self._smooth_y = 0.0
-        self._alpha = 0.3   # EMA: responsive but no jitter
-        self._step = 0
+        self._alpha = 0.12  # Low alpha = very smooth camera movement, no jitter
         self._initialized = False
 
     def update(self, robot_pos_w: torch.Tensor):
-        """Call every sim step. Updates camera every 2 steps."""
-        self._step += 1
-        if self._step % 2 != 0:
-            return
-
+        """Call every sim step. Smooth EMA tracking."""
         rx = robot_pos_w[0, 0].item()
         ry = robot_pos_w[0, 1].item()
 
@@ -271,7 +266,7 @@ if _PKG_PARENT not in sys.path:
     sys.path.insert(0, _PKG_PARENT)
 
 from high_low_hierarchical_g1.envs.hierarchical_env import (
-    HierarchicalG1Env, HierarchicalSceneCfg, PHYSICS_DT,
+    HierarchicalG1Env, HierarchicalSceneCfg, PHYSICS_DT, CONTROL_DT,
 )
 from high_low_hierarchical_g1.planning.semantic_map import SemanticMap
 from high_low_hierarchical_g1.planning.vlm_planner import VLMPlanner, SimplePlanner
@@ -316,7 +311,7 @@ def main():
     )
     sim = sim_utils.SimulationContext(sim_cfg)
     # Initial camera view — will be overridden by CameraTracker after first step
-    sim.set_camera_view(eye=[1.4, -1.4, 1.1], target=[0.3, -0.1, 0.7])
+    sim.set_camera_view(eye=[2.1, -2.1, 1.3], target=[0.2, -0.1, 0.65])
 
     # ------------------------------------------------------------------
     # 2. Create hierarchical environment
@@ -341,7 +336,7 @@ def main():
         recorder = VideoRecorder(
             output_dir=args_cli.record_dir,
             fps=args_cli.record_fps,
-            sim_dt=PHYSICS_DT,
+            control_dt=CONTROL_DT,
         )
     _wrap_env_for_recording(env, recorder=recorder, camera_tracker=camera_tracker)
 
@@ -357,6 +352,11 @@ def main():
         if not simulation_app.is_running():
             return
         obs = env.step(stand_cmd)
+
+    # Verify object didn't fall off table during stabilization
+    obj_z = env.pickup_object.data.root_pos_w[0, 2].item()
+    print(f"[Demo] Object z after stabilize: {obj_z:.3f}m "
+          f"({'ON TABLE' if obj_z > 0.4 else 'FELL OFF TABLE!'})")
 
     # ------------------------------------------------------------------
     # 4. Create semantic map (ground truth mode)
