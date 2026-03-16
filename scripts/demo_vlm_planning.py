@@ -139,52 +139,58 @@ class VideoRecorder:
         self._sim_step = 0
         self._capture_interval = max(1, int(1.0 / (control_dt * fps)))
 
-        # Create USD camera prim
+        # Use the default perspective camera (same one set_camera_view controls)
         import omni.usd
-        from pxr import UsdGeom, Sdf, Gf
+        from pxr import UsdGeom, Gf
         stage = omni.usd.get_context().get_stage()
-        cam_path = "/World/RecordCamera"
-        self._cam_prim = stage.DefinePrim(cam_path, "Camera")
-        cam = UsdGeom.Camera(self._cam_prim)
-        cam.GetFocalLengthAttr().Set(24.0)
-        cam.GetHorizontalApertureAttr().Set(20.955)
-        cam.GetClippingRangeAttr().Set(Gf.Vec2f(0.1, 1000.0))
+
+        # Find the active camera - try common paths
+        self._cam_path = None
+        for cam_candidate in ["/OmniverseKit_Persp", "/World/Camera", "/Camera"]:
+            prim = stage.GetPrimAtPath(cam_candidate)
+            if prim.IsValid():
+                self._cam_path = cam_candidate
+                break
+
+        # If no camera found, create one
+        if self._cam_path is None:
+            self._cam_path = "/World/RecordCamera"
+            cam_prim = stage.DefinePrim(self._cam_path, "Camera")
+            cam = UsdGeom.Camera(cam_prim)
+            cam.GetFocalLengthAttr().Set(24.0)
+            cam.GetHorizontalApertureAttr().Set(20.955)
+            cam.GetClippingRangeAttr().Set(Gf.Vec2f(0.1, 1000.0))
+            print(f"[VIDEO] Created camera: {self._cam_path}")
+        else:
+            print(f"[VIDEO] Using existing camera: {self._cam_path}")
 
         # Create render product + annotator
         import omni.replicator.core as rep
-        self._rp = rep.create.render_product(cam_path, (width, height))
+        self._rp = rep.create.render_product(self._cam_path, (width, height))
         self._rgb_annot = rep.AnnotatorRegistry.get_annotator("rgb")
         self._rgb_annot.attach([self._rp])
-
-        self._cam_xformable = UsdGeom.Xformable(self._cam_prim)
-        # Clear any existing xform ops and create a single transform op
-        self._cam_xformable.ClearXformOpOrder()
-        self._xform_op = self._cam_xformable.AddTransformOp()
 
         print(f"[VIDEO] Recorder initialized: {fps} FPS, {width}x{height}, "
               f"capture every {self._capture_interval} sim steps, "
               f"frames -> {self.frame_dir}")
 
     def set_camera_pose(self, eye: tuple, target: tuple):
-        """Update the offscreen camera position and look-at target.
+        """Update the camera using set_camera_view (works with default cam).
 
-        Uses Gf.Matrix4d.SetLookAt which handles the USD camera convention
-        (camera looks down -Z axis, Y is up) correctly.
+        If using /OmniverseKit_Persp, set_camera_view already controls it.
+        If using a custom camera, we set the transform via USD xform ops.
         """
-        from pxr import Gf
-
-        eye_v = Gf.Vec3d(*eye)
-        target_v = Gf.Vec3d(*target)
-        up_v = Gf.Vec3d(0, 0, 1)  # Z-up world
-
-        # SetLookAt builds a VIEW matrix (world->camera).
-        # We need the INVERSE (camera->world) for the xform.
-        view = Gf.Matrix4d()
-        view.SetLookAt(eye_v, target_v, up_v)
-        # SetLookAt returns view matrix; camera xform = inverse
-        cam_xform = view.GetInverse()
-
-        self._xform_op.Set(cam_xform)
+        # set_camera_view updates the default viewport camera
+        # Since our render product is attached to that same camera, it works
+        try:
+            from isaacsim.core.utils.viewports import set_camera_view
+            set_camera_view(
+                eye=list(eye),
+                target=list(target),
+                camera_prim_path=self._cam_path,
+            )
+        except Exception:
+            pass
 
     def on_step(self):
         """Call after every sim step. Captures frame at correct interval."""
@@ -297,6 +303,7 @@ class CameraTracker:
             self._smooth_y = ry
             self._smooth_yaw = yaw
             self._initialized = True
+            self._update_count = 0
         else:
             self._smooth_x += self._alpha_pos * (rx - self._smooth_x)
             self._smooth_y += self._alpha_pos * (ry - self._smooth_y)
@@ -316,16 +323,19 @@ class CameraTracker:
             self.TARGET_Z,
         )
 
-        # Update offscreen camera transform
+        # Update camera transform (works for both offscreen and viewport)
         if self._recorder is not None:
             self._recorder.set_camera_pose(eye, target)
-
-        # Also update viewport camera if available (GUI mode)
-        try:
-            from isaacsim.core.utils.viewports import set_camera_view
-            set_camera_view(eye=eye, target=target)
-        except Exception:
-            pass
+            self._update_count = getattr(self, '_update_count', 0) + 1
+            if self._update_count <= 2:
+                print(f"[CAM] Update #{self._update_count}: eye={eye}, target={target}")
+        else:
+            # No recorder — still update viewport camera for GUI mode
+            try:
+                from isaacsim.core.utils.viewports import set_camera_view
+                set_camera_view(eye=list(eye), target=list(target))
+            except Exception:
+                pass
 
 
 def _wrap_env_for_recording(env, recorder: VideoRecorder = None,
