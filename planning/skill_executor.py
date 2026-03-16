@@ -336,9 +336,21 @@ class SkillExecutor:
             env.set_manipulation_mode(False)
             arm_targets = None
 
-        # For hold_arm walks, use omnidirectional controller
-        # (much faster than turn-then-walk for nearby targets after lift)
+        # For hold_arm walks (carrying object), use omnidirectional controller
+        # Override target: keep robot's current X, only move to target's Y
+        # This avoids long forward walks — robot is already at table X after pickup
         if hold_arm and arm_targets is not None:
+            carrying = env.magnetic_grasp.is_attached() if hasattr(env, 'magnetic_grasp') else False
+            if carrying:
+                robot_x = r_pos[0, 0].item()
+                target_y = target_xy[0, 1].item()
+                # Keep robot X, move to basket Y — pure lateral movement
+                carry_target_xy = target_xy.clone()
+                carry_target_xy[:, 0] = robot_x
+                print(f"  [WalkTo] CARRY override: target ({target_xy[0,0]:.2f},{target_xy[0,1]:.2f}) "
+                      f"-> ({carry_target_xy[0,0]:.2f},{carry_target_xy[0,1]:.2f}) "
+                      f"(lateral only, dx=0, dy={target_y - r_pos[0,1].item():.2f})")
+                target_xy = carry_target_xy
             return self._omni_walk_to(target, target_xy, stop_distance, arm_targets)
 
         # Configure WalkTo skill with stop_distance
