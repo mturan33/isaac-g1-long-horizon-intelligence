@@ -1321,7 +1321,7 @@ class SkillExecutor:
 
         # Final forward-down body-frame target (toward basket)
         lower_body_final = torch.tensor(
-            [[0.30, -0.20, 0.15]], dtype=torch.float32, device=self.device,
+            [[0.38, -0.20, 0.10]], dtype=torch.float32, device=self.device,
         ).expand(env.num_envs, -1)
 
         print(f"  [Lower] Start EE body:  [{ee_body[0,0]:.3f}, {ee_body[0,1]:.3f}, {ee_body[0,2]:.3f}]")
