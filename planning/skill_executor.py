@@ -430,7 +430,7 @@ class SkillExecutor:
         # Fix: rotate in-place to face the target BEFORE starting the carry walk.
         if carrying:
             import math as _math_yaw
-            YAW_THRESH = _math_yaw.radians(10)  # 10° tolerance
+            YAW_THRESH = _math_yaw.radians(5)   # 5° tolerance — tighter to avoid overshoot
             YAW_MAX_STEPS = 400                  # ~8s at 50Hz — enough for 60°+
             YAW_RATE = 0.60                      # strong rotation speed
 
@@ -535,11 +535,12 @@ class SkillExecutor:
             heading_err = normalize_angle(target_heading - yaw)
 
             if carrying:
-                # CARRY mode: forward + lateral + GENTLE yaw correction
-                # Robot slowly corrects heading toward target while walking
-                vx = (dx_body * 0.8).clamp(-0.40, 0.40)
+                # CARRY mode: distance-scaled forward + lateral + yaw correction
+                # Slow down on approach so lateral/yaw corrections can work
+                speed_scale = (dist_per_env / 0.8).clamp(0.15, 1.0)  # decelerate within 0.8m
+                vx = (dx_body * 0.8 * speed_scale).clamp(-0.40, 0.40)
                 vy = (dy_body * 1.2).clamp(-0.40, 0.40)  # Faster lateral
-                vyaw = (heading_err * 0.3).clamp(-0.15, 0.15)  # Gentle yaw correction
+                vyaw = (heading_err * 0.6).clamp(-0.25, 0.25)  # Active yaw tracking
             else:
                 # NORMAL mode: full velocities (no load, arm just raised)
                 vx = (dx_body * 1.0).clamp(-0.40, 0.40)
@@ -548,7 +549,7 @@ class SkillExecutor:
 
             # EMA smoothing to prevent zigzag
             raw_cmd = torch.stack([vx, vy, vyaw], dim=-1)
-            ema_alpha = 0.5 if carrying else 0.3  # Less lag when carrying (short distances)
+            ema_alpha = 0.7 if carrying else 0.3  # Fast response when carrying (short distances, must converge)
             if step == 0:
                 smoothed_cmd = raw_cmd.clone()
             else:
