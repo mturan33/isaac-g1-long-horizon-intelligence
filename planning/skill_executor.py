@@ -834,9 +834,9 @@ class SkillExecutor:
                       f"EE->obj={obj_dist:.3f} | drift={drift:.3f} | "
                       f"cmd=[{hold_cmd[0,0]:.2f},{hold_cmd[0,1]:.2f},{hold_cmd[0,2]:.2f}]")
 
-            # Magnetic attach: 0.20m trigger (object sits below target point, arm can't close gap)
-            if not attached_during_reach and obj_dist < 0.20:
-                attached_during_reach = env.attach_object_to_hand(max_dist=0.25)
+            # Magnetic attach: 0.25m trigger (robot can't get closer due to table collision)
+            if not attached_during_reach and obj_dist < 0.25:
+                attached_during_reach = env.attach_object_to_hand(max_dist=0.30)
                 if attached_during_reach:
                     print(f"  [Reach] ** Magnetic attach at step {step}! dist={obj_dist:.3f}m **")
                     break  # Immediately freeze arm — continuing causes violent downward movements
@@ -968,7 +968,7 @@ class SkillExecutor:
 
         # Magnetic attach (skip if already attached)
         if not already_attached:
-            attached = env.attach_object_to_hand(max_dist=0.25)
+            attached = env.attach_object_to_hand(max_dist=0.30)
         else:
             attached = True
 

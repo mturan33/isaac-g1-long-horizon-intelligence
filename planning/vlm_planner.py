@@ -129,8 +129,8 @@ TASK: {task}
 
 IMPORTANT RULES:
 1. ALWAYS pre_reach BEFORE walk_to (raise arm before approaching table)
-2. Walk with hold_arm=true after pre_reach, stop_distance=0.35 (table blocks closer)
-3. Arm workspace is 0.55m - robot must be close (stop_distance=0.35)
+2. Walk with hold_arm=true after pre_reach, stop_distance=0.40 (table blocks closer)
+3. Arm workspace is 0.55m - robot must be close (stop_distance=0.40)
 4. Always reach before grasping
 5. Output ONLY valid JSON
 
@@ -240,7 +240,7 @@ class SimplePlanner:
             # 1. Raise arm HIGH before approaching table (avoids collision)
             {"skill": "pre_reach", "params": {"target": target_obj["id"]}},
             # 2. Walk to object with arm held up (0.25m — table blocks closer)
-            {"skill": "walk_to", "params": {"target": target_obj["id"], "stop_distance": 0.35, "hold_arm": True}},
+            {"skill": "walk_to", "params": {"target": target_obj["id"], "stop_distance": 0.40, "hold_arm": True}},
             # 3. Reach down to object and magnetically attach (10cm threshold)
             {"skill": "reach", "params": {"target": target_obj["id"]}},
             # 4. Close fingers around object
