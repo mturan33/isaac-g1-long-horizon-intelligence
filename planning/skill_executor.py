@@ -340,16 +340,18 @@ class SkillExecutor:
         # Override target: keep robot's current X, only move to target's Y
         # This avoids long forward walks — robot is already at table X after pickup
         if hold_arm and arm_targets is not None:
-            carrying = env.magnetic_grasp.is_attached() if hasattr(env, 'magnetic_grasp') else False
+            carrying = getattr(env, '_object_attached', False)
             if carrying:
                 robot_x = r_pos[0, 0].item()
+                robot_y = r_pos[0, 1].item()
                 target_y = target_xy[0, 1].item()
                 # Keep robot X, move to basket Y — pure lateral movement
                 carry_target_xy = target_xy.clone()
                 carry_target_xy[:, 0] = robot_x
+                lateral_dist = abs(target_y - robot_y)
                 print(f"  [WalkTo] CARRY override: target ({target_xy[0,0]:.2f},{target_xy[0,1]:.2f}) "
                       f"-> ({carry_target_xy[0,0]:.2f},{carry_target_xy[0,1]:.2f}) "
-                      f"(lateral only, dx=0, dy={target_y - r_pos[0,1].item():.2f})")
+                      f"(lateral only, dy={target_y - robot_y:.2f}, dist={lateral_dist:.2f}m)")
                 target_xy = carry_target_xy
             return self._omni_walk_to(target, target_xy, stop_distance, arm_targets)
 
@@ -436,11 +438,20 @@ class SkillExecutor:
             print(f"  [OmniWalk] NORMAL mode: full velocities (no load)")
 
         # --- Pre-walk yaw correction when carrying ---
-        # During lift, the robot's heading can drift ~5-10°. With vyaw=0 in
-        # carry mode the robot can never fix this, so the target ends up in
-        # the body-frame rear quadrant → backward walking.
-        # Fix: rotate in-place to face the target BEFORE starting the carry walk.
+        # Only needed if target is far ahead (forward walk). For lateral-only
+        # walks (carry override sets target at same X), skip yaw correction
+        # entirely — robot keeps current heading and walks sideways.
+        _do_yaw_correction = carrying
         if carrying:
+            # Check if this is a lateral-only walk (dx ≈ 0)
+            _rp = env.robot.data.root_pos_w
+            _dx = abs(target_xy[0, 0].item() - _rp[0, 0].item())
+            _dy = abs(target_xy[0, 1].item() - _rp[0, 1].item())
+            if _dx < 0.15:  # lateral-only: skip yaw correction
+                print(f"  [OmniWalk] Lateral-only walk (dx={_dx:.2f}, dy={_dy:.2f}) — skipping yaw correction")
+                _do_yaw_correction = False
+
+        if _do_yaw_correction:
             import math as _math_yaw
             YAW_THRESH = _math_yaw.radians(5)   # 5° tolerance — tighter to avoid overshoot
             YAW_MAX_STEPS = 400                  # ~8s at 50Hz — enough for 60°+
