@@ -248,8 +248,8 @@ class SimplePlanner:
             # 5. Lift arm straight up above basket height
             {"skill": "lift", "params": {}},
             # 6. Walk laterally to basket (carry override keeps X, moves Y only)
-            # stop_distance=0.35 — lateral dist ~0.5m, stop when close enough
-            {"skill": "walk_to", "params": {"target": "table_01", "stop_distance": 0.35, "hold_arm": True}},
+            # stop_distance=0.20 — get closer to basket center before placing
+            {"skill": "walk_to", "params": {"target": "table_01", "stop_distance": 0.20, "hold_arm": True}},
             # 7. Lower arm into basket
             {"skill": "lower", "params": {}},
             # 8. Release into basket
