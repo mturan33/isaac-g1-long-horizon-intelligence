@@ -25,6 +25,146 @@ from .semantic_map import SemanticMap
 from ..low_level.velocity_command import get_yaw_from_quat, normalize_angle
 
 
+# ======================================================================
+# Pure Pursuit Controller — replaces proportional velocity controller
+# ======================================================================
+
+
+class PurePursuitController:
+    """Pure Pursuit path tracking controller for humanoid walking.
+
+    Two modes:
+      - compute_normal(): Forward walk — PP curvature drives vx + vyaw
+      - compute_lateral(): Sideways strafe — PP rotated 90°, vyaw=0
+    """
+
+    def __init__(
+        self,
+        lookahead_distance: float = 0.5,
+        max_vx: float = 0.40,
+        max_vy: float = 0.40,
+        max_vyaw: float = 0.35,
+        decel_radius: float = 1.0,
+        min_speed: float = 0.05,
+        lateral_correction: float = 0.25,
+    ):
+        self.L = lookahead_distance
+        self.max_vx = max_vx
+        self.max_vy = max_vy
+        self.max_vyaw = max_vyaw
+        self.decel_radius = decel_radius
+        self.min_speed = min_speed
+        self.lateral_correction = lateral_correction
+
+    def compute_normal(
+        self,
+        dx_body: float,
+        dy_body: float,
+        dist: float,
+    ) -> tuple[float, float, float]:
+        """Normal forward walk — PP curvature drives vx + vyaw.
+
+        Args:
+            dx_body: target X in body frame (positive = in front)
+            dy_body: target Y in body frame (positive = left)
+            dist: Euclidean distance to target
+
+        Returns:
+            (vx, vy, vyaw) velocity commands
+        """
+        # Guard: very close — just stop
+        if dist < 0.02:
+            return 0.0, 0.0, 0.0
+
+        # Adaptive lookahead: shrink when close to target
+        L = min(self.L, max(dist, 0.05))
+
+        # Target behind robot (dx_body < 0): turn in place
+        if dx_body < 0.05:
+            vyaw = self.max_vyaw * (1.0 if dy_body > 0 else -1.0)
+            return 0.0, 0.0, max(-self.max_vyaw, min(self.max_vyaw, vyaw))
+
+        # Pure Pursuit curvature: κ = 2·dy / L²
+        curvature = 2.0 * dy_body / (L * L)
+
+        # Speed: decelerate as approaching target
+        speed_scale = min(1.0, dist / self.decel_radius)
+        vx = max(self.min_speed, self.max_vx * speed_scale)
+
+        # Steering: vyaw = κ · vx
+        vyaw = curvature * vx
+        vyaw = max(-self.max_vyaw, min(self.max_vyaw, vyaw))
+
+        # Alignment gating: suppress vx when heading is off
+        heading_err = math.atan2(dy_body, dx_body)
+        alignment = max(0.0, math.cos(heading_err))
+        vx *= alignment
+
+        return vx, 0.0, vyaw
+
+    def compute_lateral(
+        self,
+        dx_body: float,
+        dy_body: float,
+        dist: float,
+        direction: str = "right",
+    ) -> tuple[float, float, float]:
+        """Lateral strafe walk — PP rotated 90°, vyaw=0.
+
+        The robot keeps its heading (facing table) and slides sideways.
+        PP's "forward" axis is mapped to the robot's lateral axis.
+
+        Args:
+            dx_body: target X in body frame
+            dy_body: target Y in body frame
+            dist: Euclidean distance to target
+            direction: "right" (dy_body < 0) or "left" (dy_body > 0)
+
+        Returns:
+            (vx, vy, vyaw) velocity commands — vyaw is always 0
+        """
+        # Guard: very close — just stop
+        if dist < 0.02:
+            return 0.0, 0.0, 0.0
+
+        # 90° frame rotation: PP's forward = robot's lateral
+        if direction == "right":
+            pp_forward = -dy_body   # distance to travel rightward
+            pp_lateral = dx_body    # forward/back deviation
+        else:
+            pp_forward = dy_body    # distance to travel leftward
+            pp_lateral = -dx_body   # forward/back deviation
+
+        lateral_dist = abs(pp_forward)
+
+        # Adaptive lookahead
+        L = min(self.L, max(lateral_dist, 0.05))
+
+        # PP curvature in rotated frame
+        curvature = 2.0 * pp_lateral / (L * L)
+
+        # Speed: decelerate approaching target
+        speed_scale = min(1.0, lateral_dist / self.decel_radius)
+        pp_speed = max(self.min_speed, self.max_vy * speed_scale)
+
+        # Steering correction (rotated back to robot frame → vx)
+        pp_steer = curvature * pp_speed
+
+        # Map back to robot frame
+        if direction == "right":
+            vy = -pp_speed
+            vx = pp_steer * self.lateral_correction
+        else:
+            vy = pp_speed
+            vx = -pp_steer * self.lateral_correction
+
+        # Clamp
+        vy = max(-self.max_vy, min(self.max_vy, vy))
+        vx = max(-0.15, min(0.15, vx))
+
+        return vx, vy, 0.0  # vyaw always 0 for lateral walk
+
+
 class SkillExecutor:
     """Execute a skill plan on the HierarchicalG1Env.
 
@@ -437,6 +577,25 @@ class SkillExecutor:
         else:
             print(f"  [OmniWalk] NORMAL mode: full velocities (no load)")
 
+        # Pure Pursuit controllers (different params for carry vs normal)
+        if carrying:
+            pp_normal = PurePursuitController(
+                lookahead_distance=0.4, max_vx=0.30, max_vy=0.40,
+                max_vyaw=0.25, decel_radius=0.3, min_speed=0.08,
+                lateral_correction=0.25,
+            )
+            pp_lateral = PurePursuitController(
+                lookahead_distance=0.4, max_vx=0.15, max_vy=0.40,
+                max_vyaw=0.0, decel_radius=0.25, min_speed=0.08,
+                lateral_correction=0.25,
+            )
+        else:
+            pp_normal = PurePursuitController(
+                lookahead_distance=0.5, max_vx=0.40, max_vy=0.20,
+                max_vyaw=0.35, decel_radius=0.5, min_speed=0.08,
+                lateral_correction=0.25,
+            )
+
         # --- Pre-walk yaw correction when carrying ---
         # Only needed if target is far ahead (forward walk). For lateral-only
         # walks (carry override sets target at same X), skip yaw correction
@@ -638,40 +797,45 @@ class SkillExecutor:
             dx_body = cos_y * delta[:, 0] + sin_y * delta[:, 1]
             dy_body = -sin_y * delta[:, 0] + cos_y * delta[:, 1]
 
-            # Heading error to target
+            # Heading error to target (for logging only)
             target_heading = torch.atan2(delta[:, 1], delta[:, 0])
             heading_err = normalize_angle(target_heading - yaw)
+
+            # --- Pure Pursuit velocity computation (per-env, scalar) ---
+            # Use env 0 for scalar PP (single env demo)
+            _dx_b = dx_body[0].item()
+            _dy_b = dy_body[0].item()
+            _dist = dist_per_env[0].item()
 
             if carrying:
                 # Check if lateral-only mode (target at same X as robot)
                 _is_lateral = abs(delta[:, 0].mean().item()) < 0.20
 
                 if _is_lateral:
-                    # LATERAL CARRY mode: maintain heading, pure strafe
-                    # Robot keeps facing forward (toward table), just slides sideways
-                    # No vyaw — don't try to face the lateral target
-                    speed_scale = (dist_per_env / 0.6).clamp(0.25, 1.0)
-                    vx = (dx_body * 0.3).clamp(-0.15, 0.15)   # small X correction only
-                    vy = (dy_body * 1.5 * speed_scale).clamp(-0.40, 0.40)  # strong lateral
-                    vyaw = torch.zeros_like(heading_err)  # NO rotation — keep heading
+                    # LATERAL CARRY mode: PP rotated 90°, vyaw=0
+                    direction = "right" if _dy_b < 0 else "left"
+                    _vx, _vy, _vyaw = pp_lateral.compute_lateral(
+                        _dx_b, _dy_b, _dist, direction=direction)
                     heading_alignment = torch.ones_like(heading_err)  # dummy for logging
                 else:
-                    # FORWARD CARRY mode: heading-aligned velocity controller
-                    # vx scaled by cos(heading_err) → only walk forward when aimed at target
-                    speed_scale = (dist_per_env / 1.5).clamp(0.20, 1.0)
+                    # FORWARD CARRY mode: PP normal with conservative params
+                    _vx, _vy, _vyaw = pp_normal.compute_normal(
+                        _dx_b, _dy_b, _dist)
                     heading_alignment = torch.cos(heading_err).clamp(min=0.0)
-                    vx = (dx_body * 0.8 * speed_scale * heading_alignment).clamp(-0.40, 0.40)
-                    vy = (dy_body * 1.0 * speed_scale).clamp(-0.35, 0.35)
-                    vyaw = (heading_err * 0.8).clamp(-0.35, 0.35)
             else:
-                # NORMAL mode: full velocities (no load, arm just raised)
-                vx = (dx_body * 1.0).clamp(-0.40, 0.40)
-                vy = (dy_body * 0.6).clamp(-0.20, 0.20)
-                vyaw = (heading_err * 0.5).clamp(-0.3, 0.3)
+                # NORMAL mode: PP normal with full speed
+                _vx, _vy, _vyaw = pp_normal.compute_normal(
+                    _dx_b, _dy_b, _dist)
+                heading_alignment = torch.ones_like(heading_err)
 
-            # EMA smoothing to prevent zigzag
+            # Broadcast scalar PP output to all envs
+            vx = torch.full_like(dx_body, _vx)
+            vy = torch.full_like(dy_body, _vy)
+            vyaw = torch.full_like(heading_err, _vyaw)
+
+            # EMA smoothing (PP is already smooth, so higher alpha = trust PP more)
             raw_cmd = torch.stack([vx, vy, vyaw], dim=-1)
-            ema_alpha = 0.6 if carrying else 0.3
+            ema_alpha = 0.7 if carrying else 0.5
             if step == 0:
                 smoothed_cmd = raw_cmd.clone()
             else:
@@ -689,12 +853,14 @@ class SkillExecutor:
                 )
                 herr_deg = f"{heading_err[0].item() * 57.3:.1f}" if step > 0 else "?"
                 halign = f"{heading_alignment[0].item():.2f}" if carrying else "-"
+                _mode = "lateral-PP" if (carrying and abs(delta[:, 0].mean().item()) < 0.20) else ("carry-PP" if carrying else "normal-PP")
                 print(
                     f"  [OmniWalk] Step {step} | dist={effective_dist:.2f}m "
                     f"[{per_env}] | h={h:.2f} | "
                     f"stand={stand_count}/{env.num_envs} | reached={reached_count} | "
                     f"herr={herr_deg}deg align={halign} | "
-                    f"cmd=[{vx[0]:.2f},{vy[0]:.2f},{vyaw[0]:.2f}]"
+                    f"cmd=[{vel_cmd[0,0]:.2f},{vel_cmd[0,1]:.2f},{vel_cmd[0,2]:.2f}] | "
+                    f"mode={_mode}"
                 )
 
             if env_fallen.all():
