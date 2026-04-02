@@ -5,7 +5,7 @@ A rule-based state machine decomposes the task into 8 sequential RL skill primit
 -- walk, reach, grasp, lift, carry, lower, place -- executed by a triple-policy cascade
 (locomotion + arm + finger) trained entirely in simulation.
 
-https://github.com/user-attachments/assets/placeholder-video-link
+![Pick_Place_1](https://github.com/user-attachments/assets/700bcdf9-4e1d-447d-8534-e7c3d9fe6bb6)
 
 ## Key Results
 
