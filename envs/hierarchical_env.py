@@ -545,8 +545,12 @@ class HierarchicalG1Env:
 
         # -- Magnetic grasp: snap object to palm when close enough --
         self._object_attached = False
+        self._attached_target = None  # "object" or "drawer"
         self._attach_offset_body = torch.zeros(num_envs, 3, device=device)  # offset in palm frame
         self._attach_quat_offset = torch.zeros(num_envs, 4, device=device)  # relative orientation (wxyz)
+        self._drawer_attach_ee = None   # EE position at drawer attach time
+        self._drawer_joint_idx = None   # drawer joint index in cabinet
+        self._drawer_initial_pos = 0.0  # drawer joint pos at attach time
         self._attach_quat_offset[:, 0] = 1.0  # identity quaternion
 
         # -- Debug visualization markers --
@@ -1012,16 +1016,61 @@ class HierarchicalG1Env:
             obj_quat = self.pickup_obj.data.root_quat_w  # [N, 4] wxyz
             self._attach_quat_offset = quat_mul(quat_conjugate(palm_quat), obj_quat)
             self._object_attached = True
+            self._attached_target = "object"
             print(f"  [MagneticGrasp] Object attached! dist={mean_dist:.3f}m (orientation preserved)")
             return True
         else:
             print(f"  [MagneticGrasp] Object too far: {mean_dist:.3f}m (max: {max_dist:.2f}m)")
             return False
 
+    def attach_drawer_to_hand(self, max_dist: float = 0.30) -> bool:
+        """Magnetic-attach EE to drawer handle.
+
+        Instead of teleporting the handle (which is an articulation body),
+        we record the coupling so that pull skill can drive the drawer
+        joint proportionally to the arm retraction.
+
+        Returns True if EE is close enough to handle, False otherwise.
+        """
+        ee_world, _ = self._compute_palm_ee()
+
+        # Get drawer handle approximate position from cabinet
+        cab_pos = self.cabinet.data.root_pos_w[0]  # [3]
+        robot_pos = self.robot.data.root_pos_w[0]
+        # Handle offset: 0.3m toward robot from cabinet center, +0.25m Z
+        dx = robot_pos[0] - cab_pos[0]
+        dy = robot_pos[1] - cab_pos[1]
+        dist_xy = (dx ** 2 + dy ** 2).sqrt() + 1e-6
+        handle_pos = cab_pos.clone()
+        handle_pos[0] += 0.3 * dx / dist_xy
+        handle_pos[1] += 0.3 * dy / dist_xy
+        handle_pos[2] += 0.25
+
+        dist = (ee_world[0] - handle_pos).norm().item()
+
+        if dist < max_dist:
+            self._object_attached = True
+            self._attached_target = "drawer"
+            # Record EE start position for pull tracking
+            self._drawer_attach_ee = ee_world.clone()
+            # Find drawer_top_joint index
+            self._drawer_joint_idx = None
+            for i, name in enumerate(self.cabinet.joint_names):
+                if "drawer_top" in name:
+                    self._drawer_joint_idx = i
+                    break
+            self._drawer_initial_pos = self.cabinet.data.joint_pos[0, self._drawer_joint_idx].item() if self._drawer_joint_idx is not None else 0.0
+            print(f"  [MagneticGrasp] Drawer handle attached! dist={dist:.3f}m")
+            return True
+        else:
+            print(f"  [MagneticGrasp] Drawer handle too far: {dist:.3f}m (max: {max_dist:.2f}m)")
+            return False
+
     def detach_object(self):
         """Release the attached object (it will fall under gravity)."""
         if self._object_attached:
             self._object_attached = False
+            self._attached_target = None
             print("  [MagneticGrasp] Object detached")
 
     # ================================================================== #
@@ -1106,10 +1155,14 @@ class HierarchicalG1Env:
         """Teleport attached object to follow the palm each sim step.
         Call this AFTER scene.write_data_to_sim() and BEFORE sim.step().
 
-        Position: obj_world = ee_world + R_palm * offset_body
-        Orientation: obj_quat = q_palm * q_rel  (preserves grab-time orientation)
+        For "object" mode: teleport pickup_obj to palm.
+        For "drawer" mode: drive drawer joint proportionally to EE movement.
         """
         if not self._object_attached:
+            return
+
+        if self._attached_target == "drawer":
+            self._update_attached_drawer()
             return
 
         from isaaclab.utils.math import quat_apply, quat_mul
@@ -1127,6 +1180,37 @@ class HierarchicalG1Env:
         root_state[:, 7:] = 0.0  # zero velocity
 
         self.pickup_obj.write_root_state_to_sim(root_state)
+
+    def _update_attached_drawer(self):
+        """Drive drawer joint based on how far the EE has retracted.
+
+        The robot physically pulls its arm back. We measure how much
+        the EE moved away from its attach-time position and apply
+        that distance as drawer joint displacement.
+        This creates a realistic coupling: robot pulls → drawer opens.
+        """
+        if self._drawer_joint_idx is None or self._drawer_attach_ee is None:
+            return
+
+        ee_world, _ = self._compute_palm_ee()
+        # How far has EE moved from attach position (in XY plane)?
+        delta = self._drawer_attach_ee - ee_world  # toward robot = positive pull
+        # Project onto robot's forward axis (body X) for pull distance
+        root_quat = self.robot.data.root_quat_w
+        delta_body = quat_apply_inverse(root_quat, delta)
+        # Pull distance = movement in -X body direction (toward robot)
+        pull_dist = delta_body[:, 0].mean().item()  # positive = pulled toward robot
+
+        if pull_dist > 0.005:  # Only open if actually pulling (5mm deadzone)
+            target_pos = self._drawer_initial_pos + pull_dist
+            # Clamp to reasonable range
+            target_pos = max(0.0, min(0.40, target_pos))
+
+            # Write drawer joint state directly
+            new_pos = self.cabinet.data.joint_pos.clone()
+            new_pos[:, self._drawer_joint_idx] = target_pos
+            new_vel = torch.zeros_like(self.cabinet.data.joint_vel)
+            self.cabinet.write_joint_state_to_sim(new_pos, new_vel)
 
     def _build_arm_obs(self) -> torch.Tensor:
         """

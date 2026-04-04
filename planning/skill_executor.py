@@ -210,6 +210,7 @@ class SkillExecutor:
 
         self._stand_cmd = torch.zeros(env.num_envs, 3, device=self.device)
         self._hold_arm_targets: Optional[torch.Tensor] = None
+        self._last_reach_target: Optional[str] = None  # Track what we reached for
         # Persistent PID hold position (shared across skills)
         self._hold_pos_xy: Optional[torch.Tensor] = None
         self._hold_yaw: Optional[torch.Tensor] = None
@@ -1037,6 +1038,7 @@ class SkillExecutor:
         from isaaclab.utils.math import quat_apply_inverse, quat_apply
 
         env = self.env
+        self._last_reach_target = target  # Track for grasp to know what we're grasping
 
         if env.arm_policy is None:
             return {"status": "failed", "reason": "No arm policy loaded"}
@@ -1289,7 +1291,12 @@ class SkillExecutor:
 
         # Magnetic attach (skip if already attached)
         if not already_attached:
-            attached = env.attach_object_to_hand(max_dist=0.27)
+            # Check if we're grasping a drawer handle
+            is_drawer = self._last_reach_target and "drawer" in self._last_reach_target
+            if is_drawer:
+                attached = env.attach_drawer_to_hand(max_dist=0.50)
+            else:
+                attached = env.attach_object_to_hand(max_dist=0.27)
         else:
             attached = True
 
@@ -1747,66 +1754,59 @@ class SkillExecutor:
     # pull: Pull drawer/lever toward robot
     # ================================================================= #
     def _execute_pull(self, direction=None, distance: float = 0.25, speed: float = 0.003) -> dict:
-        """Pull drawer open by directly driving the drawer joint.
+        """Pull drawer by physically retracting the robot's arm.
 
-        Since the robot can't physically grasp the drawer handle
-        (magnetic grasp only works on free objects), we simulate the
-        pull by directly actuating the drawer prismatic joint while
-        the robot performs a coordinated arm retraction animation.
+        The robot's EE is magnetically attached to the drawer handle.
+        As the arm retracts, _update_attached_drawer() in the env
+        couples EE movement to the drawer joint — the drawer opens
+        proportionally to how far the arm pulls back.
+        No cheating: the robot does the work.
 
         Args:
             direction: [dx, dy, dz] pull direction (unused, kept for API compat)
             distance: pull distance in meters (default 0.25m)
-            speed: pull speed in m/step (default 0.003 = 3mm/step)
+            speed: arm retraction speed in rad/step
         """
         env = self.env
+
+        # Verify drawer is attached
+        if not env._object_attached or env._attached_target != "drawer":
+            return {"status": "failed", "reason": "Drawer handle not attached to hand"}
 
         # Hold position (stand still while pulling)
         root_pos = env.robot.data.root_pos_w
         hold_pos_xy = root_pos[:, :2].clone()
         hold_yaw = get_yaw_from_quat(env.robot.data.root_quat_w).clone()
 
-        # Use heuristic arm control — retract arm while drawer opens
+        # Use heuristic arm control — retract arm to pull drawer
         env.enable_arm_policy(False)
 
         # Get current arm joint positions
         current_arm = env.robot.data.joint_pos[:, env._arm_idx].clone()
         right_start = 7  # Right arm starts at index 7 in the 14-joint arm array
 
-        # Find drawer_top_joint index in cabinet
-        cabinet = env.cabinet
-        drawer_joint_idx = None
-        for i, name in enumerate(cabinet.joint_names):
-            if "drawer_top" in name:
-                drawer_joint_idx = i
-                break
-
-        if drawer_joint_idx is None:
-            return {"status": "failed", "reason": "drawer_top_joint not found in cabinet"}
-
         # Read initial drawer position
-        initial_drawer_pos = cabinet.data.joint_pos[0, drawer_joint_idx].item()
+        drawer_joint_idx = env._drawer_joint_idx
+        if drawer_joint_idx is None:
+            return {"status": "failed", "reason": "drawer_top_joint not found"}
 
-        max_steps = int(distance / speed) + 50
+        initial_drawer_pos = env.cabinet.data.joint_pos[0, drawer_joint_idx].item()
+
+        max_steps = 200  # ~4s at 50Hz
         final_drawer_pos = initial_drawer_pos
 
         for step in range(max_steps):
             if not self._is_running():
                 break
 
-            progress = min((step + 1) * speed / distance, 1.0)
-            target_drawer = initial_drawer_pos + distance * progress
+            progress = min((step + 1) / max_steps, 1.0)
 
-            # Drive drawer by directly setting joint position in sim
-            new_pos = cabinet.data.joint_pos.clone()
-            new_pos[:, drawer_joint_idx] = target_drawer
-            new_vel = torch.zeros_like(cabinet.data.joint_vel)
-            cabinet.write_joint_state_to_sim(new_pos, new_vel)
-
-            # Arm retraction animation (visual only — coordinated with drawer)
+            # Retract arm: increase shoulder pitch + bend elbow
+            # This physically moves EE backward (toward robot)
             target_arm = current_arm.clone()
-            target_arm[:, right_start + 0] += progress * 0.4   # shoulder_pitch retract
-            target_arm[:, right_start + 3] += progress * 0.2   # elbow bend
+            target_arm[:, right_start + 0] += progress * 1.2   # shoulder_pitch retract (aggressive)
+            target_arm[:, right_start + 3] += progress * 0.6   # elbow bend
+            target_arm[:, right_start + 2] -= progress * 0.3   # shoulder_yaw inward
             env.arm_controller.set_custom_targets(target_arm)
             arm_targets = env.arm_controller.get_targets()
 
@@ -1815,10 +1815,13 @@ class SkillExecutor:
             if isinstance(hold_cmd, tuple):
                 hold_cmd = hold_cmd[0]
 
+            # step_manipulation calls _update_attached_drawer internally
+            # which couples EE movement to drawer joint
             obs = env.step_manipulation(hold_cmd, arm_targets)
 
             # Read actual drawer position
-            final_drawer_pos = cabinet.data.joint_pos[0, drawer_joint_idx].item()
+            final_drawer_pos = env.cabinet.data.joint_pos[0, drawer_joint_idx].item()
+            opened = final_drawer_pos - initial_drawer_pos
 
             # Check height
             h = obs["base_height"].mean().item()
@@ -1827,11 +1830,11 @@ class SkillExecutor:
 
             # Log progress
             if step % 30 == 0:
-                opened = final_drawer_pos - initial_drawer_pos
                 print(f"  [Pull] Step {step:3d} | drawer={opened:.3f}m / {distance:.3f}m | h={h:.2f}")
 
-            # Done?
-            if progress >= 0.95:
+            # Done if drawer opened enough
+            if opened >= distance * 0.80:
+                print(f"  [Pull] Drawer opened {opened:.3f}m at step {step}")
                 break
 
         opened_dist = final_drawer_pos - initial_drawer_pos
@@ -1844,7 +1847,7 @@ class SkillExecutor:
 
         return {
             "status": "success",
-            "reason": f"Drawer opened {opened_dist:.3f}m",
+            "reason": f"Drawer opened {opened_dist:.3f}m (robot pulled)",
         }
 
     # ================================================================= #

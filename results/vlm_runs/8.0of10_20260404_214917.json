@@ -1,0 +1,72 @@
+{
+  "score": 8.0,
+  "timestamp": "20260404_214917",
+  "task": "Open the drawer",
+  "planner": "vlm",
+  "vlm_model": "qwen3-vl:4b",
+  "vlm_plan_used": true,
+  "total_time_s": 128.4,
+  "steps_succeeded": 4,
+  "steps_total": 4,
+  "final_height_m": 0.77,
+  "standing": "1/1",
+  "plan": [
+    {
+      "skill": "pre_reach",
+      "params": {
+        "target": "drawer_01"
+      }
+    },
+    {
+      "skill": "walk_to",
+      "params": {
+        "target": "drawer_01",
+        "stop_distance": 0.6,
+        "hold_arm": true
+      }
+    },
+    {
+      "skill": "pull",
+      "params": {
+        "direction": [
+          -1,
+          0,
+          0
+        ],
+        "distance": 0.25
+      }
+    },
+    {
+      "skill": "release",
+      "params": {}
+    }
+  ],
+  "step_results": [
+    {
+      "skill": "pre_reach",
+      "status": "success",
+      "reason": "Arm raised high (EE z=0.982m)"
+    },
+    {
+      "skill": "walk_to",
+      "status": "success",
+      "reason": "1/1 standing envs reached drawer_01"
+    },
+    {
+      "skill": "pull",
+      "status": "success",
+      "reason": "Drawer opened 0.240m"
+    },
+    {
+      "skill": "release",
+      "status": "success",
+      "reason": "Released and arm returned to default"
+    }
+  ],
+  "scoring_breakdown": {
+    "completion": "4/4 = 5.0/5",
+    "standing": "1/1 = 2.0/2",
+    "speed": "128.4s = 0.0/2",
+    "vlm_plan": "yes = 1.0/1"
+  }
+}
