@@ -358,6 +358,124 @@ from high_low_hierarchical_g1.planning.semantic_map import SemanticMap
 from high_low_hierarchical_g1.planning.vlm_planner import OllamaVLMPlanner, SimplePlanner
 from high_low_hierarchical_g1.planning.skill_executor import SkillExecutor
 
+import threading
+
+
+# ============================================================================
+# Closed-Loop Controller (VLM background replanning)
+# ============================================================================
+
+class ClosedLoopController:
+    """VLM runs continuously in background, can update the plan mid-execution."""
+
+    def __init__(self, vlm_planner, semantic_map, env, task):
+        self.vlm = vlm_planner
+        self.smap = semantic_map
+        self.env = env
+        self.task = task
+
+        self.current_plan = []
+        self.completed_steps = []
+        self.current_skill = None
+        self.plan_lock = threading.Lock()
+        self.running = False
+        self._thread = None
+        self.replan_count = 0
+
+    def start(self, initial_plan):
+        """Start background replanning thread."""
+        with self.plan_lock:
+            self.current_plan = list(initial_plan)
+        self.running = True
+        self._thread = threading.Thread(target=self._replan_loop, daemon=True)
+        self._thread.start()
+        print(f"[CL] Closed-loop started. Replanning every ~10s")
+
+    def stop(self):
+        """Stop background thread."""
+        self.running = False
+        if self._thread:
+            self._thread.join(timeout=30)
+        print(f"[CL] Stopped. Total replans: {self.replan_count}")
+
+    def get_next_step(self):
+        """Get next skill to execute (called from main loop)."""
+        with self.plan_lock:
+            if self.current_plan:
+                return self.current_plan[0]
+            return None
+
+    def step_completed(self, step, result):
+        """Notify that a skill completed."""
+        with self.plan_lock:
+            self.completed_steps.append({
+                "skill": step["skill"],
+                "result": result.get("reason", "ok"),
+            })
+            if self.current_plan and self.current_plan[0] == step:
+                self.current_plan.pop(0)
+            self.current_skill = None
+
+    def mark_current(self, step):
+        """Mark the currently executing skill."""
+        self.current_skill = step["skill"] if step else None
+
+    def _replan_loop(self):
+        """Background thread: continuously call VLM for replanning."""
+        while self.running:
+            time.sleep(3)  # Wait for skill to start
+            if not self.running:
+                break
+
+            try:
+                # Capture camera
+                cam_b64 = None
+                try:
+                    self.smap.capture_camera()
+                    cam_b64 = self.smap.get_camera_base64()
+                except Exception:
+                    pass
+
+                # Update semantic map
+                self.smap.update()
+                world_state = self.smap.get_json()
+
+                # Get current plan state
+                with self.plan_lock:
+                    remaining = [dict(s) for s in self.current_plan]
+                    completed = list(self.completed_steps)
+                    current = self.current_skill
+
+                t0 = time.time()
+                result = self.vlm.replan(
+                    task=self.task,
+                    world_state_json=world_state,
+                    camera_image_b64=cam_b64,
+                    completed_steps=completed,
+                    remaining_plan=remaining,
+                    current_skill=current,
+                )
+                dt = time.time() - t0
+
+                decision = result.get("decision", "continue")
+
+                if decision == "replan" and "plan" in result:
+                    with self.plan_lock:
+                        self.current_plan = result["plan"]
+                    self.replan_count += 1
+                    print(f"[CL] REPLAN! ({dt:.1f}s) New plan: {len(result['plan'])} steps")
+                elif decision == "done":
+                    with self.plan_lock:
+                        self.current_plan = []
+                    print(f"[CL] VLM says DONE ({dt:.1f}s)")
+                    break
+                else:
+                    print(f"[CL] Continue ({dt:.1f}s)")
+
+            except Exception as e:
+                print(f"[CL] Error: {e}")
+                time.sleep(5)
+
 
 def _save_vlm_result(args, result, total_time, final_height, standing, num_envs, plan):
     """Save VLM run result with auto-scoring to results/vlm_runs/."""
@@ -591,7 +709,59 @@ def main():
     )
 
     start_time = time.time()
-    result = executor.execute_plan(plan)
+
+    # ------------------------------------------------------------------
+    # 6b. Execute plan (closed-loop or open-loop)
+    # ------------------------------------------------------------------
+    if args_cli.closed_loop and args_cli.planner == "vlm":
+        # Closed-loop: VLM replans in background while skills execute
+        cl = ClosedLoopController(vlm, semantic_map, env, args_cli.task)
+        cl.start(plan)
+
+        plan_results = []
+        while True:
+            step = cl.get_next_step()
+            if step is None:
+                print("[CL] No more steps — task complete")
+                break
+
+            cl.mark_current(step)
+            skill_name = step["skill"]
+            params = step.get("params", {})
+            print(f"\n[CL] Executing: {skill_name}({params})")
+
+            handler = executor._skills.get(skill_name)
+            if handler is None:
+                skill_result = {"status": "failed", "reason": f"Unknown skill: {skill_name}"}
+            else:
+                try:
+                    skill_result = handler(**params)
+                except Exception as e:
+                    skill_result = {"status": "failed", "reason": str(e)}
+
+            plan_results.append({"skill": skill_name, "params": params, "result": skill_result})
+            cl.step_completed(step, skill_result)
+
+            status = skill_result.get("status", "failed")
+            reason = skill_result.get("reason", "")
+            symbol = "+" if status == "success" else "x"
+            print(f"  [{symbol}] {skill_name}: {status} - {reason}")
+
+            if status == "failed":
+                print(f"[CL] Skill failed, waiting for VLM replan...")
+                time.sleep(10)
+                if cl.get_next_step() is None:
+                    break
+
+        cl.stop()
+        result = {
+            "completed": all(r["result"]["status"] == "success" for r in plan_results),
+            "plan_results": plan_results,
+        }
+    else:
+        # Open-loop: execute plan in one shot (original behavior)
+        result = executor.execute_plan(plan)
+
     result["fallback"] = vlm_fallback
     total_time = time.time() - start_time
 
