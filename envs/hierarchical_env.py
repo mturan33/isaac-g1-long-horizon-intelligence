@@ -49,6 +49,7 @@ from isaaclab.assets import (
 )
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
+from isaaclab.sensors import CameraCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
@@ -390,6 +391,28 @@ class HierarchicalSceneCfg(InteractiveSceneCfg):
                 damping=5.0,
             ),
         },
+    )
+
+    # -- Head camera (for VLM closed-loop) --
+    # Mounted on d435_link (robot head depth camera mount)
+    # 2Hz update to save GPU bandwidth, robot doesn't need 50Hz vision
+    head_camera: CameraCfg = CameraCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/d435_link/front_cam",
+        offset=CameraCfg.OffsetCfg(
+            pos=(0.0, 0.0, 0.0),
+            rot=(0.5, -0.5, 0.5, -0.5),  # ROS convention: +Z forward
+            convention="ros",
+        ),
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=7.6,
+            focus_distance=400.0,
+            horizontal_aperture=20.0,
+            clipping_range=(0.1, 10.0),
+        ),
+        data_types=["rgb"],
+        width=640,
+        height=480,
+        update_period=0.5,  # 2Hz — every 0.5s
     )
 
     # -- Dome light --

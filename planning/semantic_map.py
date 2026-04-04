@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import math
 import torch
+import numpy as np
 from typing import Optional, Any
 
 
@@ -46,6 +47,10 @@ class SemanticMap:
         self.interactables: dict[str, dict] = {}
         self.robot_state: dict = {}
 
+        # Camera state (for VLM closed-loop)
+        self.last_camera_rgb: Optional[np.ndarray] = None
+        self.last_camera_b64: Optional[str] = None
+
         # Validate
         if mode == "ground_truth" and env is None:
             raise ValueError("ground_truth mode requires env parameter")
@@ -54,13 +59,23 @@ class SemanticMap:
 
         print(f"[SemanticMap] Initialized in '{mode}' mode")
 
-    def update(self, rgb=None, depth=None, camera_intrinsics=None):
-        """Update world state. Call each frame before planning or execution."""
+    def update(self, rgb=None, depth=None, camera_intrinsics=None, camera_data=None):
+        """Update world state. Call each frame before planning or execution.
+
+        Args:
+            camera_data: Optional [H,W,3] or [H,W,4] numpy array from head camera.
+                Stored for VLM closed-loop replanning.
+        """
         if self.mode == "ground_truth":
             self._update_from_sim()
         else:
             self._update_from_perception(rgb, depth, camera_intrinsics)
         self._update_robot_state()
+
+        # Store camera image for VLM
+        if camera_data is not None:
+            self.last_camera_rgb = camera_data
+            self.last_camera_b64 = self._rgb_to_base64(camera_data)
 
     # ------------------------------------------------------------------
     # Ground truth mode (Isaac Lab sim)
@@ -310,3 +325,36 @@ class SemanticMap:
             if class_name in target_id or target_id in class_name:
                 return entity
         return None
+
+    # ------------------------------------------------------------------
+    # Camera helpers (for VLM closed-loop)
+    # ------------------------------------------------------------------
+    def _rgb_to_base64(self, rgb_array: np.ndarray) -> str:
+        """Convert RGB numpy array to base64 JPEG string for Ollama VLM."""
+        import base64
+        import io
+        from PIL import Image
+
+        img_np = rgb_array.astype(np.uint8)
+        if img_np.shape[-1] == 4:  # RGBA → RGB
+            img_np = img_np[:, :, :3]
+        img = Image.fromarray(img_np)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=70)
+        return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+    def get_camera_base64(self) -> Optional[str]:
+        """Get latest camera image as base64 JPEG for VLM."""
+        return self.last_camera_b64
+
+    def capture_camera(self):
+        """Capture current camera frame from simulation and store it."""
+        if self.env is None:
+            return
+        try:
+            cam = self.env.scene["head_camera"]
+            rgb = cam.data.output["rgb"][0].cpu().numpy()
+            self.last_camera_rgb = rgb
+            self.last_camera_b64 = self._rgb_to_base64(rgb)
+        except Exception:
+            pass  # Camera not available — graceful degrade

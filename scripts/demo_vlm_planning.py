@@ -70,6 +70,10 @@ parser.add_argument(
     "--record_fps", type=int, default=25,
     help="Target FPS for recording (captures every N-th sim step)",
 )
+parser.add_argument(
+    "--closed_loop", action="store_true",
+    help="Enable VLM closed-loop replanning (background thread, ~10s cycle)",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 

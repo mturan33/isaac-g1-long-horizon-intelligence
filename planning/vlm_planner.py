@@ -202,6 +202,72 @@ class OllamaVLMPlanner:
             print(f"[VLM] Error: {e}", file=sys.stderr)
             return None
 
+    def replan(
+        self,
+        task: str,
+        world_state_json: dict,
+        camera_image_b64: Optional[str] = None,
+        completed_steps: list = None,
+        remaining_plan: list = None,
+        current_skill: Optional[str] = None,
+    ) -> dict:
+        """Continuous closed-loop re-plan. Called from background thread.
+
+        Args:
+            task: Original task description
+            world_state_json: Current world state from SemanticMap
+            camera_image_b64: Base64 JPEG from head camera (or None)
+            completed_steps: List of completed skill names + results
+            remaining_plan: Current remaining plan steps
+            current_skill: Currently executing skill name
+
+        Returns:
+            {"decision": "continue"} or
+            {"decision": "replan", "plan": [...]} or
+            {"decision": "done"}
+        """
+        if self._ollama is None:
+            return {"decision": "continue"}
+
+        completed_steps = completed_steps or []
+        remaining_plan = remaining_plan or []
+
+        prompt = f"""You are monitoring a humanoid robot executing a task in real-time.
+
+Task: {task}
+Completed: {json.dumps(completed_steps)}
+Current: {current_skill or "idle"}
+Remaining: {json.dumps([s.get("skill", s) for s in remaining_plan])}
+World: {json.dumps(world_state_json)}
+
+Decide: "continue" if plan is correct, "replan" with new plan if wrong, "done" if finished.
+Output ONLY JSON: {{"decision": "continue"}} or {{"decision": "replan", "plan": [...]}} or {{"decision": "done"}}
+/no_think"""
+
+        messages = [{"role": "user", "content": prompt}]
+
+        # Attach camera image if available
+        if camera_image_b64:
+            messages[0]["images"] = [camera_image_b64]
+
+        try:
+            resp = self._ollama.chat(
+                model=self.model,
+                messages=messages,
+                stream=False,
+            )
+            text = resp.message.content.strip()
+            # Try to parse JSON from response
+            clean = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+            # Find JSON object
+            match = re.search(r'\{.*\}', clean, re.DOTALL)
+            if match:
+                return json.loads(match.group())
+            return {"decision": "continue"}
+        except Exception as e:
+            print(f"[CL] Replan error: {e}", file=sys.stderr)
+            return {"decision": "continue"}
+
     def unload_model(self):
         """Unload model from GPU to free VRAM. Call at end of demo."""
         try:
