@@ -275,15 +275,28 @@ class SemanticMap:
         if self.mode != "ground_truth" or self.env is None:
             return None
 
-        # For interactables (drawer), return handle body position
+        # For interactables (drawer), return a walk target IN FRONT of the handle
+        # (not the handle itself, which is flush with the cabinet body)
         if target_id in self.interactables:
-            # Re-read fresh handle position (it moves as drawer opens)
             env = self.env
             if hasattr(env, 'cabinet'):
                 cab = env.cabinet
                 cab_pos = cab.data.root_pos_w[0].cpu().tolist()
                 handle_pos = self._get_handle_position(cab, cab_pos)
-                return torch.tensor(handle_pos, device=env.device).unsqueeze(0).expand(
+
+                # Offset walk target 0.5m from handle toward robot
+                # so robot stops in front of the handle, not at the cabinet edge
+                robot_pos = env.robot.data.root_pos_w[0].cpu().tolist()
+                dx = robot_pos[0] - handle_pos[0]
+                dy = robot_pos[1] - handle_pos[1]
+                dist_xy = math.sqrt(dx * dx + dy * dy) + 1e-6
+                approach_offset = 0.5  # Stand 0.5m in front of handle
+                walk_target = [
+                    handle_pos[0] + approach_offset * dx / dist_xy,
+                    handle_pos[1] + approach_offset * dy / dist_xy,
+                    handle_pos[2],
+                ]
+                return torch.tensor(walk_target, device=env.device).unsqueeze(0).expand(
                     env.num_envs, -1
                 ).clone()
             # Fallback to stored position
