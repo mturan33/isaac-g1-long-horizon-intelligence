@@ -465,8 +465,8 @@ class HierarchicalG1Env:
         self.table: RigidObject = self.scene["table"]
         self.pickup_obj: RigidObject = self.scene["pickup_object"]
         self.cabinet: Articulation = self.scene["cabinet"]
-        # Scale handle visuals BEFORE physics init (avoid invalidating PhysX view)
-        self._scale_drawer_handle(scale_factor=1.5)
+        # Handle scaling disabled — xform scale causes visual offset
+        # self._scale_drawer_handle(scale_factor=1.5)
 
         # -- Load V6.2 locomotion policy --
         from ..low_level.policy_wrapper import LocomotionPolicy
@@ -998,22 +998,15 @@ class HierarchicalG1Env:
                 return
             for prim in Usd.PrimRange(cab_prim):
                 path_str = prim.GetPath().pathString.lower()
-                # Only scale visual MESH prims under handle (not parent body or collisions)
+                # Only scale leaf MESH geometry inside handle visuals
+                # (not the visuals Xform itself — that would offset position)
                 if "handle" in path_str and "/visuals" in path_str:
-                    if prim.IsA(UsdGeom.Xformable):
+                    if prim.IsA(UsdGeom.Mesh):
                         xform = UsdGeom.Xformable(prim)
-                        has_scale = False
-                        for op in xform.GetOrderedXformOps():
-                            if op.GetOpType() == UsdGeom.XformOp.TypeScale:
-                                existing = op.Get()
-                                op.Set(Gf.Vec3f(existing[0] * scale_factor, existing[1] * scale_factor, existing[2] * scale_factor))
-                                has_scale = True
-                                break
-                        if not has_scale:
-                            scale_op = xform.AddScaleOp(opSuffix="vis")
-                            scale_op.Set(Gf.Vec3f(scale_factor, scale_factor, scale_factor))
+                        scale_op = xform.AddScaleOp(opSuffix="handleVis")
+                        scale_op.Set(Gf.Vec3f(scale_factor, scale_factor, scale_factor))
                         scaled_count += 1
-                        print(f"  [HandleScale] Scaled: {prim.GetPath()} by {scale_factor}x")
+                        print(f"  [HandleScale] Scaled mesh: {prim.GetPath()} by {scale_factor}x")
             if scaled_count == 0:
                 # Fallback: list all prims for debugging
                 all_names = []
