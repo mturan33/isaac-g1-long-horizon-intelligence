@@ -1069,7 +1069,7 @@ class HierarchicalG1Env:
             print(f"  [MagneticGrasp] Object too far: {mean_dist:.3f}m (max: {max_dist:.2f}m)")
             return False
 
-    def attach_drawer_to_hand(self, max_dist: float = 0.60) -> bool:
+    def attach_drawer_to_hand(self, max_dist: float = 0.25) -> bool:
         """Rigid-attach EE to drawer handle (parent-child lock).
 
         When attached:
