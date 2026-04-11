@@ -1308,7 +1308,7 @@ class SkillExecutor:
             # Check if we're grasping a drawer handle
             is_drawer = self._last_reach_target and "drawer" in self._last_reach_target
             if is_drawer:
-                attached = env.attach_drawer_to_hand(max_dist=0.65)
+                attached = env.attach_drawer_to_hand(max_dist=0.85)
             else:
                 attached = env.attach_object_to_hand(max_dist=0.27)
         else:

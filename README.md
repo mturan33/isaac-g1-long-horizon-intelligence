@@ -1,230 +1,252 @@
-# Hierarchical VLM-RL Pick-and-Place for G1 Humanoid
+# Hierarchical VLM-RL Pick-and-Place & Drawer Opening for G1 Humanoid
 
-End-to-end autonomous pick-and-place on the Unitree G1 (29 DoF) in NVIDIA Isaac Lab.
-A rule-based state machine decomposes the task into 8 sequential RL skill primitives
--- walk, reach, grasp, lift, carry, lower, place -- executed by a triple-policy cascade
-(locomotion + arm + finger) trained entirely in simulation.
+End-to-end autonomous manipulation on the Unitree G1 (29 DoF) in NVIDIA Isaac Lab.
+A VLM (Qwen3-VL) decomposes natural language tasks into skill primitives, executed by
+a triple-policy cascade (locomotion + arm + finger) trained entirely in simulation.
+
+Supports two task types:
+- **Pick-and-place**: Walk to object, grasp, carry, place in basket
+- **Drawer opening**: Walk to cabinet, grasp handle, pull drawer open
 
 ![Pick_Place_1](https://github.com/user-attachments/assets/700bcdf9-4e1d-447d-8534-e7c3d9fe6bb6)
 
 ## Key Results
 
-- **8/8 skill steps** completed autonomously in ~100 s (sim time)
-- **Zero falls** during full pick-carry-place trajectory
-- Lateral carry walk with Pure Pursuit controller (no rotation, pure strafe)
-- Magnetic grasp attaches at 0.21 m with orientation preservation
-- Trained with 12-level curriculum (perturbation-robust locomotion)
+| Task | Steps | Success | Time |
+|------|-------|---------|------|
+| Pick-and-place (VLM) | 8/8 | 100% | ~80s |
+| Drawer opening (VLM) | 6/6 | 100% | ~50s |
+| Pick-and-place (rule) | 8/8 | 100% | ~35s |
+| Drawer opening (rule) | 6/6 | 100% | ~30s |
+
+- **Zero falls** during full trajectories
+- **VLM closed-loop**: Background replanning every ~10s
+- Lateral carry with heading-hold Pure Pursuit controller
+- Physical drawer pull via arm retraction + backward walk
 
 ## Architecture
 
 ```
-                        ┌────────────────────────────────────────────────┐
-  "Pick up the          │              Skill Executor                   │
-   steering wheel" ───► │  pre_reach ► walk_to ► reach ► grasp ► lift  │
-                        │  ► carry_walk ► lower ► place                │
-                        └─────────┬──────────────┬──────────────────────┘
-                                  │              │
-                          ┌───────▼──────┐ ┌─────▼──────┐
-                          │  Loco Policy │ │ Arm Policy  │
-                          │  (Stage 2)   │ │ (Stage 2)   │
-                          │  66 → 15     │ │ 39 → 7      │
-                          │  50 Hz       │ │ 50 Hz       │
-                          └───────┬──────┘ └─────┬──────┘
-                                  │              │
-                          ┌───────▼──────────────▼──────┐
-                          │   Isaac Lab / PhysX 50 Hz   │
-                          │   G1 29-DoF  (12L+3W+7A+7H) │
-                          └─────────────────────────────┘
+  "Open the drawer"          VLM Planner (Qwen3-VL 4B)
+         |                          |
+         v                          v
+  +-----------------+    +-------------------+
+  | Semantic Map    |--->| Skill Plan (JSON) |
+  | (ground truth)  |    | pre_reach, walk,  |
+  +-----------------+    | reach, grasp,     |
+                         | pull, release     |
+                         +--------+----------+
+                                  |
+                    +-------------v--------------+
+                    |      Skill Executor         |
+                    |  Pure Pursuit walk + PID    |
+                    +------+-------------+-------+
+                           |             |
+                   +-------v------+ +----v-------+
+                   | Loco Policy  | | Arm Policy  |
+                   | 66->15 (50Hz)| | 39->7 (50Hz)|
+                   +-------+------+ +----+-------+
+                           |             |
+                   +-------v-------------v-------+
+                   |   Isaac Lab / PhysX (50 Hz)  |
+                   |   G1 29-DoF + Cabinet + Table|
+                   +-----------------------------+
 ```
 
-### Triple-Policy Cascade
+## Quick Start
 
-| Policy | Input | Output | Training |
-|--------|-------|--------|----------|
-| **Stage 2 Loco** | 66-dim (body vel, gravity, joints, commands) | 15-dim (12 leg + 3 waist) | V6.2 fine-tuned with arm perturbation, 12-level curriculum |
-| **Stage 2 Arm** | 39-dim (arm joints, EE body-frame, target, orient) | 7-dim (right arm joints) | Frozen loco, spherical workspace reaching |
-| **Finger** | Heuristic | 14-dim (7 per hand) | DEX3 open/close controller |
-
-Each policy is trained with the previous frozen, enabling sequential curriculum learning.
-
-## Demo
-
-```bash
-cd C:\IsaacLab
-.\isaaclab.bat -p source\isaaclab_tasks\isaaclab_tasks\direct\high_low_hierarchical_g1\scripts\demo_vlm_planning.py ^
-    --num_envs 1 ^
-    --checkpoint <stage2_loco_checkpoint> ^
-    --arm_checkpoint <stage2_arm_checkpoint> ^
-    --task "Pick up the steering wheel from the table" ^
-    --planner simple
-```
-
-Add `--record` to save a video of the run.
-
-### Skill Execution Pipeline
-
-```
-Step 1  pre_reach    Raise arm to high position (EE z ≈ 0.97 m)
-Step 2  walk_to      Walk to object (Pure Pursuit, ~300 steps)
-Step 3  reach        Extend arm to object (Stage 2 arm policy)
-Step 4  grasp        Magnetic grasp attachment (0.21 m threshold)
-Step 5  lift         Lift object (EE z ≈ 0.95 m)
-Step 6  walk_to      Lateral carry walk to basket (Pure Pursuit, vyaw = 0)
-Step 7  lower        Lower arm to table height
-Step 8  place        Release object into basket
-```
-
-## Training
-
-### Stage 2 Locomotion (Perturbation-Robust)
-
-```bash
-.\isaaclab.bat -p source\isaaclab_tasks\isaaclab_tasks\direct\isaac_g1_ulc\g1\isaac_g1_ulc\train\29dof\train_unified_stage_2_loco.py ^
-    --stage1_checkpoint <v6.2_model.pt> ^
-    --arm_checkpoint <stage2_arm_model.pt> ^
-    --num_envs 4096 --headless
-```
-
-12-level curriculum: standing → slow walk → omnidirectional → heavy load (2 kg) →
-extreme perturbation (80 N push) → walk/stop transitions → variable-height squat.
-Frozen arm policy provides continuous perturbation (random reaching + payload forces).
-
-### Stage 2 Arm (Reaching)
-
-```bash
-.\isaaclab.bat -p source\isaaclab_tasks\isaaclab_tasks\direct\isaac_g1_ulc\g1\isaac_g1_ulc\train\29dof\train_unified_stage_2_arm.py ^
-    --stage1_checkpoint <v6.2_model.pt> ^
-    --num_envs 4096 --headless
-```
-
-## Project Structure
-
-```
-high_low_hierarchical_g1/
-├── config/
-│   ├── joint_config.py          # Joint names, defaults, action scales
-│   └── skill_config.py          # Skill primitive parameters
-├── envs/
-│   └── hierarchical_env.py      # Main env: policy cascade, magnetic grasp, mode switching
-├── planning/
-│   ├── skill_executor.py        # Walk controller (Pure Pursuit), reach, grasp, lift, lower, place
-│   ├── vlm_planner.py           # Task decomposition (rule-based state machine)
-│   └── semantic_map.py          # Ground-truth object/surface positions
-├── low_level/
-│   ├── policy_wrapper.py        # Loco policy inference wrapper
-│   ├── arm_policy_wrapper.py    # Arm policy inference wrapper
-│   ├── arm_controller.py        # Heuristic arm interpolation controller
-│   ├── finger_controller.py     # DEX3 finger open/close
-│   └── velocity_command.py      # Velocity command interface
-├── perception/
-│   └── perception-module-python/ # Florence-2 detector + SAM2 segmentor + DepthAnything
-├── scripts/
-│   ├── demo_vlm_planning.py     # End-to-end demo with video recording
-│   ├── test_skills.py           # Individual skill testing
-│   └── test_hierarchical.py     # Full system integration test
-└── skills/
-    ├── base_skill.py            # Skill base class
-    ├── walk_to.py               # Walk-to-target skill
-    ├── turn_to.py               # Turn-to-heading skill
-    ├── stand_still.py           # Stand-still skill
-    └── heuristic_manipulation.py # Grasp/place heuristics
-```
-
-## Walk Controller: Pure Pursuit
-
-The walk controller uses **Pure Pursuit** with two modes:
-
-| Mode | Use Case | vx | vy | vyaw | Decel Radius |
-|------|----------|----|----|------|-------------|
-| **Normal** | Walk to object | 0.40 | 0.20 | 0.35 | 0.5 m |
-| **Carry** | Forward carry walk | 0.30 | 0.40 | 0.25 | 0.3 m |
-| **Lateral** | Sideways carry to basket | 0.15 | 0.40 | hold | 0.25 m |
-
-Lateral mode uses a heading-hold P-controller (Kp=2.5, vyaw_max=0.35) to maintain
-robot orientation during strafe. Pre-walk yaw correction is skipped for lateral walks.
-
-## Installation
-
-### Tested Configuration
+### Prerequisites
 
 | Component | Version |
 |-----------|---------|
-| **OS** | Windows 11 Pro |
-| **GPU** | NVIDIA RTX 5070 Ti Laptop (Blackwell) |
-| **NVIDIA Driver** | 591.74 |
-| **Python** | 3.11 |
-| **Isaac Sim** | 5.1.0 |
-| **Isaac Lab** | 0.48.0 (`release/2.3.0`) |
-| **PyTorch** | 2.7.0+cu128 |
-| **h5py** | 3.11.0 |
-| **numpy** | 1.26.x |
+| OS | Windows 11 |
+| GPU | NVIDIA RTX (Blackwell: use driver 591.74) |
+| Python | 3.11 |
+| Isaac Sim | 5.1.0 |
+| Isaac Lab | 0.48.0 (release/2.3.0) |
+| Ollama | Latest (for VLM planner) |
 
-> **Driver Warning (Blackwell GPUs):** NVIDIA driver 595.79 causes Isaac Sim 5.1 GUI
-> to crash with an access violation in `omni.kit.menu.core`. Use driver **591.74** or
-> earlier 591.xx builds. Headless mode works with any driver version.
-
-### Setup Steps
+### Installation
 
 ```bash
-# 1. Create conda environment
+# 1. Conda environment
 conda create -n env_isaaclab python=3.11 -y
 conda activate env_isaaclab
 
-# 2. Install Isaac Sim 5.1
+# 2. Isaac Sim
 pip install isaacsim==5.1.0 isaacsim-kernel==5.1.0 isaacsim-core==5.1.0 \
     --extra-index-url https://pypi.nvidia.com
 
-# 3. Clone Isaac Lab and install
-git clone https://github.com/isaac-sim/IsaacLab.git
-cd IsaacLab
+# 3. Isaac Lab
+git clone https://github.com/isaac-sim/IsaacLab.git C:\IsaacLab
+cd C:\IsaacLab
 git checkout release/2.3.0
 .\isaaclab.bat --install
 
-# 4. Fix h5py compatibility (Isaac Sim bundles older HDF5)
+# 4. Fix dependencies
 pip install h5py==3.11.0 --force-reinstall --no-cache-dir
 pip install numpy==1.26.0
 
-# 5. (Optional) Install Ollama for VLM planner
-# Download from https://ollama.com, then:
-ollama pull qwen3-vl:2b
+# 5. VLM planner (optional)
+pip install ollama
+# Install Ollama app from https://ollama.com, then:
+ollama pull qwen3-vl:4b
+
+# 6. Copy this project into IsaacLab source tree
+# Place high_low_hierarchical_g1/ under:
+# C:\IsaacLab\source\isaaclab_tasks\isaaclab_tasks\direct\
 ```
 
-### Verify Installation
+### Run Demos
+
+All commands from `C:\IsaacLab`:
 
 ```bash
-# Headless test (should complete 8/8 steps)
-.\isaaclab.bat -p source\isaaclab_tasks\isaaclab_tasks\direct\high_low_hierarchical_g1\scripts\demo_vlm_planning.py ^
-    --num_envs 1 --headless ^
-    --checkpoint <loco_checkpoint> ^
-    --arm_checkpoint <arm_checkpoint> ^
-    --task "Pick up the steering wheel from the table" --planner simple
+# === PICK-AND-PLACE ===
 
-# GUI test (requires compatible driver)
-# Same command without --headless
+# Simple planner (no VLM, instant)
+.\isaaclab.bat -p source\isaaclab_tasks\isaaclab_tasks\direct\high_low_hierarchical_g1\scripts\demo_vlm_planning.py ^
+    --num_envs 1 ^
+    --checkpoint logs\ulc\g1_stage2_loco_2026-03-14_21-58-52\model_best.pt ^
+    --arm_checkpoint logs\ulc\g1_stage2_arm_2026-03-06_18-51-31\model_best.pt ^
+    --task "Pick up the steering wheel from the table" ^
+    --planner simple
+
+# VLM planner (requires Ollama running)
+.\isaaclab.bat -p source\isaaclab_tasks\isaaclab_tasks\direct\high_low_hierarchical_g1\scripts\demo_vlm_planning.py ^
+    --num_envs 1 ^
+    --checkpoint logs\ulc\g1_stage2_loco_2026-03-14_21-58-52\model_best.pt ^
+    --arm_checkpoint logs\ulc\g1_stage2_arm_2026-03-06_18-51-31\model_best.pt ^
+    --task "Pick up the steering wheel from the table" ^
+    --planner vlm --vlm_model qwen3-vl:4b
+
+# === DRAWER OPENING ===
+
+.\isaaclab.bat -p source\isaaclab_tasks\isaaclab_tasks\direct\high_low_hierarchical_g1\scripts\demo_vlm_planning.py ^
+    --num_envs 1 ^
+    --checkpoint logs\ulc\g1_stage2_loco_2026-03-14_21-58-52\model_best.pt ^
+    --arm_checkpoint logs\ulc\g1_stage2_arm_2026-03-06_18-51-31\model_best.pt ^
+    --task "Open the drawer" ^
+    --planner vlm --vlm_model qwen3-vl:4b
+
+# === CLOSED-LOOP (VLM replans every ~10s) ===
+
+.\isaaclab.bat -p source\isaaclab_tasks\isaaclab_tasks\direct\high_low_hierarchical_g1\scripts\demo_vlm_planning.py ^
+    --num_envs 1 ^
+    --checkpoint logs\ulc\g1_stage2_loco_2026-03-14_21-58-52\model_best.pt ^
+    --arm_checkpoint logs\ulc\g1_stage2_arm_2026-03-06_18-51-31\model_best.pt ^
+    --task "Open the drawer" ^
+    --planner vlm --vlm_model qwen3-vl:4b --closed_loop
+
+# Add --headless for no GUI (faster)
+# Add --record for video capture
 ```
 
-## Environment
+### Command-Line Options
 
-- **Simulation**: Isaac Lab / Isaac Sim 5.1.0 + PhysX
+| Flag | Description |
+|------|-------------|
+| `--planner simple` | Rule-based planner (no VLM needed) |
+| `--planner vlm` | VLM planner via Ollama |
+| `--vlm_model qwen3-vl:4b` | Ollama model name |
+| `--closed_loop` | Enable VLM background replanning |
+| `--headless` | No GUI (faster, for testing) |
+| `--record` | Record video frames |
+| `--num_envs N` | Number of parallel environments |
+
+## Skill Library
+
+### Pick-and-Place Skills
+
+| # | Skill | Description |
+|---|-------|-------------|
+| 1 | `pre_reach` | Raise arm high before approaching table |
+| 2 | `walk_to` | Pure Pursuit walk to target (object/surface) |
+| 3 | `reach` | Arm policy extends to object |
+| 4 | `grasp` | Magnetic grasp + finger close |
+| 5 | `lift` | Lift object above table height |
+| 6 | `walk_to` | Lateral carry walk to basket |
+| 7 | `lower` | Lower arm to basket level |
+| 8 | `place` | Release object, return arm |
+
+### Drawer Skills
+
+| # | Skill | Description |
+|---|-------|-------------|
+| 1 | `pre_reach` | Raise arm high |
+| 2 | `walk_to` | Walk to drawer handle |
+| 3 | `reach` | Hold arm for grasp |
+| 4 | `grasp` | Magnetic attach to handle |
+| 5 | `pull` | Arm retraction + backward walk |
+| 6 | `release` | Detach, return arm to default |
+
+## VLM Planner
+
+The VLM (Qwen3-VL via Ollama) receives:
+- World state JSON (robot pos, objects, surfaces, interactables)
+- Task description in natural language
+
+And outputs a JSON skill plan:
+```json
+{"plan": [
+  {"skill": "pre_reach", "params": {"target": "drawer_01"}},
+  {"skill": "walk_to", "params": {"target": "drawer_01", "stop_distance": 0.8, "hold_arm": true}},
+  {"skill": "pull", "params": {"direction": [-1, 0, 0], "distance": 0.25}},
+  {"skill": "release", "params": {}}
+]}
+```
+
+### Closed-Loop Mode
+
+With `--closed_loop`, a background thread continuously:
+1. Updates the semantic map
+2. Calls VLM for replanning decisions
+3. Can modify the plan mid-execution if conditions change
+
+## Walk Controller: Pure Pursuit
+
+| Mode | Use Case | vx | vy | vyaw |
+|------|----------|----|----|------|
+| **Normal** | Walk to object | 0.40 | 0.20 | 0.35 |
+| **Carry** | Forward carry | 0.30 | 0.40 | 0.25 |
+| **Lateral** | Sideways to basket | 0.15 | 0.40 | hold |
+
+Lateral mode uses heading-hold P-controller (Kp=2.5) to maintain orientation.
+
+## Scene
+
 - **Robot**: Unitree G1 29-DoF (12 leg + 3 waist + 7 arm + 7 finger)
-- **Control frequency**: 50 Hz (4x decimation at 200 Hz physics)
-- **Objects**: Steering wheel on table, basket as placement target
-- **Grasp**: Magnetic attachment at 0.21 m distance
+- **Table**: PackingTable with basket
+- **Object**: Steering wheel (scaled 0.75x)
+- **Cabinet**: Sektion cabinet with prismatic drawer joints (scaled 1.3x)
+- **Control**: 50 Hz (4x decimation at 200 Hz physics)
 
 ## Troubleshooting
 
-| Problem | Cause | Fix |
-|---------|-------|-----|
-| GUI crash (access violation in `omni.kit.menu.core`) | NVIDIA driver 595.x + Blackwell GPU | Downgrade to driver 591.74 |
-| `ImportError: DLL load failed` on h5py | h5py 3.16+ incompatible with Isaac Sim HDF5 | `pip install h5py==3.11.0` |
-| `No module named 'isaacsim'` | Missing isaacsim packages | `pip install isaacsim-core==5.1.0 --extra-index-url https://pypi.nvidia.com` |
-| numpy version conflict | h5py install pulls numpy 2.x | `pip install numpy==1.26.0` |
-| "filename or extension is too long" | Windows MAX_PATH + long conda paths | Non-blocking; enable long paths in Windows registry |
+| Problem | Fix |
+|---------|-----|
+| GUI crash on Blackwell GPU | Use NVIDIA driver 591.74 (not 595.x) |
+| h5py DLL error | `pip install h5py==3.11.0` |
+| numpy conflict | `pip install numpy==1.26.0` |
+| VLM returns empty | Ensure Ollama is running (`ollama serve`) |
+| "filename too long" DLL errors | Non-blocking; enable Windows long paths |
+| Camera lock in GUI | Only locks with `--record`; free otherwise |
+
+## Scoring System
+
+VLM runs are auto-scored (0-10) and saved to `results/vlm_runs/`:
+
+| Criterion | Points |
+|-----------|--------|
+| Step completion (N/total) | 5.0 |
+| Robot standing at end | 2.0 |
+| Speed (< 60s = 2, < 120s = 1) | 2.0 |
+| VLM plan used (not fallback) | 1.0 |
 
 ## References
 
-- Ahn et al. 2022 -- SayCan: VLM + affordance scoring for robot task planning
-- Ouyang et al. 2024 -- Berkeley Loco-Manipulation: skill chaining + VLM cascade
-- Gu et al. 2025 (RSS) -- HOMIE: height-coupled knee reward for humanoid locomotion
-- Coulter 1992 -- Pure Pursuit path tracking for mobile robots
-- unitree_rl_lab -- G1 29-DoF locomotion training framework
+- Ahn et al. 2022 -- SayCan: VLM + affordance scoring
+- Ouyang et al. 2024 -- Berkeley Loco-Manipulation
+- Gu et al. 2025 (RSS) -- HOMIE: height-coupled knee reward
+- Coulter 1992 -- Pure Pursuit path tracking
+- unitree_rl_lab -- G1 29-DoF locomotion framework
