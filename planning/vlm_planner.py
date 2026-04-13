@@ -304,7 +304,7 @@ Pick-and-place sequence:
 pre_reach -> walk_to(object, 0.4, true) -> reach -> grasp -> lift -> walk_to(surface, 0.2, true) -> lower -> place
 
 Drawer opening sequence (reach locks EE to handle, pull walks robot backward with arm fixed):
-pre_reach -> walk_to(drawer, 1.3, true) -> reach(drawer) -> grasp -> pull([-1,0,0], 0.25) -> release
+pre_reach -> walk_to(drawer, 1.0, true) -> reach(drawer) -> grasp -> pull([-1,0,0], 0.25) -> release
 
 Objects: {obj_list}
 Surfaces: {surf_list}
@@ -315,7 +315,7 @@ Example 1 (pick-place):
 {{"plan": [{{"skill": "pre_reach", "params": {{"target": "object_01"}}}}, {{"skill": "walk_to", "params": {{"target": "object_01", "stop_distance": 0.4, "hold_arm": true}}}}, {{"skill": "reach", "params": {{"target": "object_01"}}}}, {{"skill": "grasp", "params": {{}}}}, {{"skill": "lift", "params": {{}}}}, {{"skill": "walk_to", "params": {{"target": "table_01", "stop_distance": 0.2, "hold_arm": true}}}}, {{"skill": "lower", "params": {{}}}}, {{"skill": "place", "params": {{}}}}]}}
 
 Example 2 (drawer):
-{{"plan": [{{"skill": "pre_reach", "params": {{"target": "drawer_01"}}}}, {{"skill": "walk_to", "params": {{"target": "drawer_01", "stop_distance": 1.3, "hold_arm": true}}}}, {{"skill": "reach", "params": {{"target": "drawer_01"}}}}, {{"skill": "grasp", "params": {{}}}}, {{"skill": "pull", "params": {{"direction": [-1, 0, 0], "distance": 0.25}}}}, {{"skill": "release", "params": {{}}}}]}}
+{{"plan": [{{"skill": "pre_reach", "params": {{"target": "drawer_01"}}}}, {{"skill": "walk_to", "params": {{"target": "drawer_01", "stop_distance": 1.0, "hold_arm": true}}}}, {{"skill": "reach", "params": {{"target": "drawer_01"}}}}, {{"skill": "grasp", "params": {{}}}}, {{"skill": "pull", "params": {{"direction": [-1, 0, 0], "distance": 0.25}}}}, {{"skill": "release", "params": {{}}}}]}}
 
 Now generate the plan for the task above. Output ONLY the JSON object, nothing else."""
 
@@ -610,7 +610,7 @@ class SimplePlanner:
             return []
         return [
             {"skill": "pre_reach", "params": {"target": drawer["id"]}},
-            {"skill": "walk_to", "params": {"target": drawer["id"], "stop_distance": 1.3, "hold_arm": True}},
+            {"skill": "walk_to", "params": {"target": drawer["id"], "stop_distance": 1.0, "hold_arm": True}},
             {"skill": "reach", "params": {"target": drawer["id"]}},
             {"skill": "grasp", "params": {}},
             {"skill": "pull", "params": {"direction": [-1, 0, 0], "distance": 0.25}},
