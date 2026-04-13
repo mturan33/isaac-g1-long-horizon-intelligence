@@ -1014,13 +1014,9 @@ class SkillExecutor:
                 print(f"  [PreReach] Step {step:3d} | h={h:.2f} | stand={standing}/{env.num_envs} | "
                       f"EE=[{ee_now[0,0]:.2f},{ee_now[0,1]:.2f},{ee_now[0,2]:.2f}]")
 
-        # FREEZE arm at raised position + set wrist horizontal from the start
+        # FREEZE arm at raised position (wrist stays default for arm policy compatibility)
         env.enable_arm_policy(False)
         self._hold_arm_targets = env.robot.data.joint_pos[:, env._arm_idx].clone()
-        # Wrist horizontal (right arm: 11=roll, 12=pitch, 13=yaw)
-        self._hold_arm_targets[:, 11] = -1.57
-        self._hold_arm_targets[:, 12] = 0.0
-        self._hold_arm_targets[:, 13] = 0.0
 
         ee_final, _ = env._compute_palm_ee()
         print(f"  [PreReach] Final EE: [{ee_final[0,0]:.3f}, {ee_final[0,1]:.3f}, {ee_final[0,2]:.3f}]")
@@ -1059,23 +1055,17 @@ class SkillExecutor:
                     if "drawer_handle" in name or "handle_bottom" in name or "handle_top" in name:
                         handle_pos_world = cab.data.body_pos_w[0, i].clone()
                         break
-                if handle_pos_world is None:
-                    for i, name in enumerate(cab.body_names):
-                        if "drawer_top" in name and "joint" not in name:
-                            handle_pos_world = cab.data.body_pos_w[0, i].clone()
-                            break
             except Exception:
                 pass
             if handle_pos_world is None:
                 handle_pos_world = cab.data.root_pos_w[0].clone()
                 handle_pos_world[2] += 0.25
 
-            # Compute target in body frame — reach toward handle position
+            # Compute target in body frame
             root_pos = env.robot.data.root_pos_w
             root_quat = env.robot.data.root_quat_w
             handle_body = quat_apply_inverse(root_quat, handle_pos_world.unsqueeze(0) - root_pos)
 
-            # Clamp to arm workspace (MAX_REACH from shoulder)
             shoulder_offset = torch.tensor(self.SHOULDER_OFFSET, device=self.device)
             from_shoulder = handle_body - shoulder_offset.unsqueeze(0)
             dist_3d = from_shoulder.norm(dim=-1, keepdim=True)
@@ -1089,27 +1079,27 @@ class SkillExecutor:
             print(f"  [Reach] Drawer handle world: [{handle_pos_world[0]:.3f}, {handle_pos_world[1]:.3f}, {handle_pos_world[2]:.3f}]")
             print(f"  [Reach] Reach target body:  [{reach_target_body[0,0]:.3f}, {reach_target_body[0,1]:.3f}, {reach_target_body[0,2]:.3f}]")
 
-            # PID hold + arm policy reach toward handle
+            # Arm policy reach toward handle
             hold_pos_xy = root_pos[:, :2].clone()
             hold_yaw = get_yaw_from_quat(root_quat).clone()
             self._hold_pos_xy = hold_pos_xy
             self._hold_yaw = hold_yaw
 
-            reach_steps = 150  # Give arm time to reach down to handle
+            reach_steps = 100
+            attached = False
+            ee_to_handle = 999.0
             for step in range(reach_steps):
                 if not self._is_running():
                     break
                 hold_cmd, _ = self._compute_hold_cmd(hold_pos_xy, hold_yaw)
                 obs = env.step_arm_policy(hold_cmd)
 
-                # Refresh hold every 40 steps
                 if step > 0 and step % 40 == 0:
                     hold_pos_xy = env.robot.data.root_pos_w[:, :2].clone()
                     hold_yaw = get_yaw_from_quat(env.robot.data.root_quat_w).clone()
                     self._hold_pos_xy = hold_pos_xy
                     self._hold_yaw = hold_yaw
 
-                # Check EE distance to handle
                 ee_world, _ = env._compute_palm_ee()
                 ee_to_handle = (ee_world[0] - handle_pos_world).norm().item()
 
@@ -1117,30 +1107,30 @@ class SkillExecutor:
                     h = obs["base_height"].mean().item()
                     print(f"  [Reach] Step {step:3d} | h={h:.2f} | EE->handle={ee_to_handle:.3f}m")
 
-                # Attach when EE reaches close to handle
                 if ee_to_handle < 0.30:
                     attached = env.attach_drawer_to_hand(max_dist=0.35)
                     if attached:
                         print(f"  [Reach] ** Drawer handle LOCKED at step {step}! dist={ee_to_handle:.3f}m **")
-                        # Record arm position for pull phase
                         self._hold_arm_targets = env.robot.data.joint_pos[:, env._arm_idx].clone()
                         break
 
-            # Switch to heuristic arm — freeze arm at current position
-            env.enable_arm_policy(False)
+            # Fallback: attach at whatever distance arm reached
+            if not attached:
+                attached = env.attach_drawer_to_hand(max_dist=0.70)
+                if attached:
+                    print(f"  [Reach] Handle locked (fallback, dist={ee_to_handle:.3f}m)")
 
-            # Set wrist horizontal for drawer grip (palm faces handle)
+            # Switch to heuristic + wrist horizontal + fingers close
+            env.enable_arm_policy(False)
             arm_targets = env.robot.data.joint_pos[:, env._arm_idx].clone()
-            # Right wrist: indices 11=roll, 12=pitch, 13=yaw in the 14-joint arm array
-            arm_targets[:, 11] = -1.57   # wrist_roll: rotate palm inward
-            arm_targets[:, 12] = 0.0     # wrist_pitch: neutral
-            arm_targets[:, 13] = 0.0     # wrist_yaw: neutral
+            arm_targets[:, 11] = -1.57
+            arm_targets[:, 12] = 0.0
+            arm_targets[:, 13] = 0.0
             self._hold_arm_targets = arm_targets
 
-            # Close fingers for visual grip + interpolate wrist to target
             env.finger_controller.close(hand="right")
             original_speed = env.finger_controller.close_speed
-            env.finger_controller.close_speed = 0.20  # Fast close
+            env.finger_controller.close_speed = 0.20
             for _ in range(15):
                 if not self._is_running():
                     break
