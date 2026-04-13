@@ -8,7 +8,8 @@ Supports two task types:
 - **Pick-and-place**: Walk to object, grasp, carry, place in basket
 - **Drawer opening**: Walk to cabinet, grasp handle, pull drawer open
 
-![Pick_Place_1](https://github.com/user-attachments/assets/700bcdf9-4e1d-447d-8534-e7c3d9fe6bb6)
+<img src="https://github.com/user-attachments/assets/700bcdf9-4e1d-447d-8534-e7c3d9fe6bb6" width="600"/>
+<img src="https://github.com/user-attachments/assets/a76af9e9-a317-438d-ba78-8aa116ef7d87" width="600"/>
 
 ## Key Results
 
