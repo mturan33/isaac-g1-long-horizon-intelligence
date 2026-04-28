@@ -108,6 +108,59 @@ class PurePursuitController:
 
         return vx, 0.0, vyaw
 
+    def compute_normal_batch(
+        self,
+        dx_body: torch.Tensor,
+        dy_body: torch.Tensor,
+        dist: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Vectorized version of compute_normal for multi-env.
+
+        Same logic as compute_normal but each env gets its own (vx, vy, vyaw)
+        based on its own (dx_body, dy_body, dist). Avoids the env-0-broadcast
+        anti-pattern that causes 8/8 walk_to failures.
+
+        Args:
+            dx_body, dy_body, dist: [num_envs] float tensors (body-frame target)
+
+        Returns:
+            (vx, vy, vyaw): each [num_envs] float tensor
+        """
+        zeros = torch.zeros_like(dx_body)
+        very_close_mask = dist < 0.02
+
+        # Heading error per env
+        heading_err = torch.atan2(dy_body, dx_body)
+
+        # Adaptive lookahead per env: L = min(self.L, max(dist, 0.05))
+        L = torch.clamp(dist, min=0.05)
+        L = torch.clamp(L, max=self.L)
+
+        # Turn-in-place mask: target behind OR (close <0.9m AND misaligned >23°)
+        turn_in_place_mask = (dx_body < 0.05) | ((dist < 0.9) & (heading_err.abs() > 0.4))
+
+        vyaw_sign = torch.where(dy_body > 0, torch.ones_like(dy_body), -torch.ones_like(dy_body))
+        vyaw_turn = torch.clamp(self.max_vyaw * vyaw_sign, min=-self.max_vyaw, max=self.max_vyaw)
+
+        # Pure Pursuit branch (per env)
+        curvature = 2.0 * dy_body / (L * L)
+        speed_scale = torch.clamp(dist / self.decel_radius, max=1.0)
+        vx_pp = torch.clamp(self.max_vx * speed_scale, min=self.min_speed)
+        vyaw_pp = torch.clamp(curvature * vx_pp, min=-self.max_vyaw, max=self.max_vyaw)
+        alignment = torch.clamp(torch.cos(heading_err), min=0.0)
+        vx_pp = vx_pp * alignment
+
+        # Combine branches via masks
+        vx = torch.where(turn_in_place_mask, zeros, vx_pp)
+        vy = zeros
+        vyaw = torch.where(turn_in_place_mask, vyaw_turn, vyaw_pp)
+
+        # Very-close guard: zero out
+        vx = torch.where(very_close_mask, zeros, vx)
+        vyaw = torch.where(very_close_mask, zeros, vyaw)
+
+        return vx, vy, vyaw
+
     def compute_lateral(
         self,
         dx_body: float,
@@ -823,40 +876,40 @@ class SkillExecutor:
             target_heading = torch.atan2(delta[:, 1], delta[:, 0])
             heading_err = normalize_angle(target_heading - yaw)
 
-            # --- Pure Pursuit velocity computation (per-env, scalar) ---
-            # Use env 0 for scalar PP (single env demo)
-            _dx_b = dx_body[0].item()
-            _dy_b = dy_body[0].item()
-            _dist = dist_per_env[0].item()
-
+            # --- Pure Pursuit velocity computation ---
+            # FIX: Vectorized per-env PP for NORMAL mode (multi-env walk_to support)
+            # Carry mode kept scalar (single-env path: post-pickup → basket)
             if carrying:
-                # Check if lateral-only mode (target at same X as robot)
+                # Carry path is single-env in practice (one robot picked up object)
+                _dx_b = dx_body[0].item()
+                _dy_b = dy_body[0].item()
+                _dist = dist_per_env[0].item()
                 _is_lateral = abs(delta[:, 0].mean().item()) < 0.20
 
                 if _is_lateral:
                     # LATERAL CARRY mode: PP rotated 90° with heading hold
                     direction = "right" if _dy_b < 0 else "left"
-                    # Heading hold: error = current_yaw - initial_yaw
                     _yaw_drift = normalize_angle(yaw[0] - _initial_yaw).item()
                     _vx, _vy, _vyaw = pp_lateral.compute_lateral(
                         _dx_b, _dy_b, _dist, direction=direction,
                         heading_error=_yaw_drift)
-                    heading_alignment = torch.ones_like(heading_err)  # dummy for logging
+                    heading_alignment = torch.ones_like(heading_err)
                 else:
-                    # FORWARD CARRY mode: PP normal with conservative params
+                    # FORWARD CARRY mode
                     _vx, _vy, _vyaw = pp_normal.compute_normal(
                         _dx_b, _dy_b, _dist)
                     heading_alignment = torch.cos(heading_err).clamp(min=0.0)
-            else:
-                # NORMAL mode: PP normal with full speed
-                _vx, _vy, _vyaw = pp_normal.compute_normal(
-                    _dx_b, _dy_b, _dist)
-                heading_alignment = torch.ones_like(heading_err)
 
-            # Broadcast scalar PP output to all envs
-            vx = torch.full_like(dx_body, _vx)
-            vy = torch.full_like(dy_body, _vy)
-            vyaw = torch.full_like(heading_err, _vyaw)
+                # Broadcast scalar to all envs (carry path is single-env)
+                vx = torch.full_like(dx_body, _vx)
+                vy = torch.full_like(dy_body, _vy)
+                vyaw = torch.full_like(heading_err, _vyaw)
+            else:
+                # NORMAL mode: VECTORIZED per-env PP (each env independent target)
+                vx, vy, vyaw = pp_normal.compute_normal_batch(
+                    dx_body, dy_body, dist_per_env
+                )
+                heading_alignment = torch.ones_like(heading_err)
 
             # EMA smoothing (PP is already smooth, so higher alpha = trust PP more)
             raw_cmd = torch.stack([vx, vy, vyaw], dim=-1)
