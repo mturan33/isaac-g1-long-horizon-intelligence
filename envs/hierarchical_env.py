@@ -35,6 +35,7 @@ V6.2 actuator parameters are matched EXACTLY to training config.
 from __future__ import annotations
 
 import math
+import os
 import torch
 import numpy as np
 from typing import Optional
@@ -57,6 +58,47 @@ from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 
 
 # =============================================================================
+# SCENE ASSET ROOT (Unitree unitree_sim_isaaclab pack)
+# =============================================================================
+# The scene USDs are not vendored here: they belong to Unitree (Apache-2.0) and
+# ship as a ~1.2 GB Git-LFS pack. They are resolved relative to this file,
+# expecting Unitree's repository to be cloned as a SIBLING of this one:
+#
+#   direct/high_low_hierarchical_g1/envs/hierarchical_env.py   <- this file
+#   direct/unitree_sim_isaaclab/assets/...                     <- the assets
+#
+# Set the G1_SIM_ASSETS environment variable to override; it must point at the
+# directory containing objects/ and robots/. See "Scene Assets" in README.md.
+
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+UNITREE_ASSETS_DIR = os.path.normpath(
+    os.environ.get("G1_SIM_ASSETS")
+    or os.path.join(_THIS_DIR, os.pardir, os.pardir, "unitree_sim_isaaclab", "assets")
+)
+
+if not os.path.isdir(UNITREE_ASSETS_DIR):
+    raise FileNotFoundError(
+        "Unitree scene assets not found (looked in: {}). Clone "
+        "https://github.com/unitreerobotics/unitree_sim_isaaclab next to this "
+        "repository and run its fetch_assets.sh, or set G1_SIM_ASSETS to the "
+        "directory containing objects/ and robots/. See the 'Scene Assets' "
+        "section of README.md.".format(UNITREE_ASSETS_DIR)
+    )
+
+
+def _asset(*parts: str) -> str:
+    """Absolute path to a Unitree scene asset, as a forward-slash USD path."""
+    path = os.path.normpath(os.path.join(UNITREE_ASSETS_DIR, *parts))
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "Scene asset missing: {}. The assets root exists but this file is "
+            "not in it, so the pack may be partially extracted. Re-run "
+            "fetch_assets.sh.".format(path)
+        )
+    return path.replace(os.sep, "/")
+
+
+# =============================================================================
 # V6.2 CONSTANTS — must match training exactly
 # =============================================================================
 
@@ -71,7 +113,7 @@ LEG_ACTION_SCALE = 0.4   # radians
 WAIST_ACTION_SCALE = 0.2  # radians
 
 # DEX3 USD path — SAME as V6.2 training (from unitree_sim_isaaclab)
-DEX3_USD_PATH = "C:/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/unitree_sim_isaaclab/assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0.usd"
+DEX3_USD_PATH = _asset("robots", "g1-29dof_wholebody_dex3", "g1_29dof_with_dex3_rev_1_0.usd")
 
 # Joint names — ordered by control group
 LOCO_JOINT_NAMES = [
@@ -323,7 +365,7 @@ class HierarchicalSceneCfg(InteractiveSceneCfg):
     table: RigidObjectCfg = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Table",
         spawn=sim_utils.UsdFileCfg(
-            usd_path="C:/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/unitree_sim_isaaclab/assets/objects/PackingTable/PackingTable.usd",
+            usd_path=_asset("objects", "PackingTable", "PackingTable.usd"),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
@@ -359,7 +401,7 @@ class HierarchicalSceneCfg(InteractiveSceneCfg):
     cabinet: ArticulationCfg = ArticulationCfg(
         prim_path="{ENV_REGEX_NS}/Cabinet",
         spawn=sim_utils.UsdFileCfg(
-            usd_path="C:/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/unitree_sim_isaaclab/assets/objects/drawers/cabinet_collider.usd",
+            usd_path=_asset("objects", "drawers", "cabinet_collider.usd"),
             scale=(1.3, 1.3, 1.3),  # Original scale — handle scaled separately
             activate_contact_sensors=False,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(

@@ -145,9 +145,17 @@ upstream archive (`assets.zip`, `sha256:06fbf145…ead4b0`) — unmodified:
 | `objects/drawers/cabinet_collider.usd` | 267 KB | `af9703419973d930` |
 | `robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0.usd` | 40.6 MB | `01677e6ab1d321e7` |
 
-> **Note:** these paths are currently hard-coded as absolute Windows paths in
-> `envs/hierarchical_env.py` (lines 74, 326, 362). If your Isaac Lab checkout is
-> not at `C:\IsaacLab`, edit those three lines to match your layout.
+Paths are resolved relative to `envs/hierarchical_env.py`, so the sibling layout
+above works out of the box on any platform. If your assets live somewhere else,
+point `G1_SIM_ASSETS` at the directory containing `objects/` and `robots/`:
+
+```bash
+export G1_SIM_ASSETS=/path/to/unitree_sim_isaaclab/assets   # Linux/macOS
+set G1_SIM_ASSETS=D:\assets                                 # Windows cmd
+```
+
+If the assets are missing, import fails immediately with a message naming the
+directory it searched, rather than a USD load error deeper in the stack.
 
 ### Pre-trained Checkpoints
 
