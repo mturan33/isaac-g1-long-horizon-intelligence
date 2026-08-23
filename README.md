@@ -104,6 +104,51 @@ ollama pull qwen3-vl:4b
 # C:\IsaacLab\source\isaaclab_tasks\isaaclab_tasks\direct\
 ```
 
+### Scene Assets (required)
+
+The scene USDs (table, cabinet, and the Dex3-handed G1) are **not** part of this
+repository. They are published by Unitree in
+[`unitree_sim_isaaclab`](https://github.com/unitreerobotics/unitree_sim_isaaclab)
+(Apache-2.0) and distributed as a ~1.2 GB Git-LFS archive, so they are fetched
+separately:
+
+```bash
+cd C:\IsaacLab\source\isaaclab_tasks\isaaclab_tasks\direct
+git clone https://github.com/unitreerobotics/unitree_sim_isaaclab.git
+cd unitree_sim_isaaclab && bash fetch_assets.sh
+```
+
+`fetch_assets.sh` clones the
+[HF dataset](https://huggingface.co/datasets/unitreerobotics/unitree_sim_isaaclab_usds),
+unzips `assets.zip`, and moves `assets/` into the repository root. It is a bash
+script and uses `unzip`, so on Windows run it from **Git Bash** (or unzip
+`assets.zip` manually into `unitree_sim_isaaclab/assets/`).
+
+`unitree_sim_isaaclab/` must sit **next to** this project, not inside it:
+
+```
+direct/
+├── high_low_hierarchical_g1/     <- this repository
+└── unitree_sim_isaaclab/         <- cloned above
+    └── assets/
+        ├── objects/PackingTable/PackingTable.usd
+        ├── objects/drawers/cabinet_collider.usd
+        └── robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0.usd
+```
+
+Three files are loaded by `envs/hierarchical_env.py`. Verified against the
+upstream archive (`assets.zip`, `sha256:06fbf145…ead4b0`) — unmodified:
+
+| File | Size | SHA-256 (first 16) |
+|------|------|--------------------|
+| `objects/PackingTable/PackingTable.usd` | 16.5 MB | `841457256b476a7d` |
+| `objects/drawers/cabinet_collider.usd` | 267 KB | `af9703419973d930` |
+| `robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0.usd` | 40.6 MB | `01677e6ab1d321e7` |
+
+> **Note:** these paths are currently hard-coded as absolute Windows paths in
+> `envs/hierarchical_env.py` (lines 74, 326, 362). If your Isaac Lab checkout is
+> not at `C:\IsaacLab`, edit those three lines to match your layout.
+
 ### Pre-trained Checkpoints
 
 Pre-trained policies (trained on this same hardware/config) are shipped under `checkpoints/`:
